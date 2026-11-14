@@ -45,7 +45,8 @@ ehthumbs.db
 Desktop.ini
 .DS_Store
 
-# Temporary files
+# Temporary files & helper scripts
+push_to_github.bat
 test_elevate.bat
 *.tmp
 *.bak
