@@ -45,6 +45,10 @@ ehthumbs.db
 Desktop.ini
 .DS_Store
 
+# Distribution & releases
+dist/
+*.zip
+
 # Temporary files & helper scripts
 push_to_github.bat
 test_elevate.bat
