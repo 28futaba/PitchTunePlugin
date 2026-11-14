@@ -1,0 +1,37 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 11.00
+# Visual Studio Version 18
+
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PitchTunePlugin - VST3", "PitchTunePlugin_VST3.vcxproj", "{48E237B6-E93E-6C24-FF19-0BE5DC0D55DA}"
+	ProjectSection(ProjectDependencies) = postProject
+		{FE32E178-761C-DE7C-F4EB-DCB8C5144FBF} = {FE32E178-761C-DE7C-F4EB-DCB8C5144FBF}
+		{DD67B7F9-2000-A25B-B473-2CB85974D7CB} = {DD67B7F9-2000-A25B-B473-2CB85974D7CB}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PitchTunePlugin - Shared Code", "PitchTunePlugin_SharedCode.vcxproj", "{FE32E178-761C-DE7C-F4EB-DCB8C5144FBF}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PitchTunePlugin - VST3 Manifest Helper", "PitchTunePlugin_VST3ManifestHelper.vcxproj", "{DD67B7F9-2000-A25B-B473-2CB85974D7CB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{48E237B6-E93E-6C24-FF19-0BE5DC0D55DA}.Debug|x64.ActiveCfg = Debug|x64
+		{48E237B6-E93E-6C24-FF19-0BE5DC0D55DA}.Debug|x64.Build.0 = Debug|x64
+		{48E237B6-E93E-6C24-FF19-0BE5DC0D55DA}.Release|x64.ActiveCfg = Release|x64
+		{48E237B6-E93E-6C24-FF19-0BE5DC0D55DA}.Release|x64.Build.0 = Release|x64
+		{FE32E178-761C-DE7C-F4EB-DCB8C5144FBF}.Debug|x64.ActiveCfg = Debug|x64
+		{FE32E178-761C-DE7C-F4EB-DCB8C5144FBF}.Debug|x64.Build.0 = Debug|x64
+		{FE32E178-761C-DE7C-F4EB-DCB8C5144FBF}.Release|x64.ActiveCfg = Release|x64
+		{FE32E178-761C-DE7C-F4EB-DCB8C5144FBF}.Release|x64.Build.0 = Release|x64
+		{DD67B7F9-2000-A25B-B473-2CB85974D7CB}.Debug|x64.ActiveCfg = Debug|Win32
+		{DD67B7F9-2000-A25B-B473-2CB85974D7CB}.Debug|x64.Build.0 = Debug|Win32
+		{DD67B7F9-2000-A25B-B473-2CB85974D7CB}.Release|x64.ActiveCfg = Release|Win32
+		{DD67B7F9-2000-A25B-B473-2CB85974D7CB}.Release|x64.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

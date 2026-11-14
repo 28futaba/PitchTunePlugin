@@ -1,0 +1,51 @@
+# Visual Studio
+.vs/
+*.user
+*.userosv
+*.suo
+*.suo.*
+*.sln.docstates
+*.db
+*.opendb
+*.VC.db
+
+# Build outputs & binaries
+x64/
+x86/
+Win32/
+ARM64/
+Debug/
+Release/
+Builds/**/x64/
+Builds/**/x86/
+Builds/**/Win32/
+Builds/**/ARM64/
+Builds/**/Debug/
+Builds/**/Release/
+Builds/**/.vs/
+*.obj
+*.pdb
+*.idb
+*.tlog
+*.lastbuildstate
+*.unsuccessfulbuild
+*.ilk
+*.exp
+*.lib
+*.dll
+*.vst3
+*.exe
+*.res
+*.manifest
+*.log
+
+# Windows & OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Temporary files
+test_elevate.bat
+*.tmp
+*.bak
