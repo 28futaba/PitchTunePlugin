@@ -1,6 +1,7 @@
 # PitchTunePlugin (ARA 2.0 手動ピッチ補正 VST3 プラグイン)
 
 JUCE 8 と Celemony ARA 2.0 SDK を用いて開発されたオフライン手動ピッチ補正 VST3 プラグインです。
+※AI製(Gemini Argon)です。
 
 ---
 
