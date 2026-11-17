@@ -14,6 +14,8 @@
 
 #include <JuceHeader.h>
 #include <juce_audio_formats/format/juce_ARAAudioReaders.h>
+#include <map>
+#include <string>
 #include "PitchDetector.h"
 #include "PitchShifter.h"
 
@@ -50,8 +52,8 @@ public:
     // Represents a detected/edited musical note block
     struct Note
     {
-        double startTime = 0.0; // In seconds
-        double endTime = 0.0;   // In seconds
+        double startTime = 0.0; // In seconds (AudioSource / AudioModification time)
+        double endTime = 0.0;   // In seconds (AudioSource / AudioModification time)
         int originalMidiNote = 0;
         int targetMidiNote = 0;
         
@@ -62,16 +64,36 @@ public:
     /** Performs pitch analysis on the clip's audio source. */
     void analyzeAudio();
 
+    /** Signals background analysis to stop early if the region is being destroyed. */
+    void requestAbortAnalysis() noexcept { abortAnalysis.store (true); }
+
     /** Checks if the background analysis has completed. */
     bool isAnalysisCompleted() const noexcept { return analysisCompleted.load(); }
 
-    /** Computes the required pitch shift (in semitones) at a given timeline position. */
+    /** Restores persisted notes from an ARA archive safely under lock. */
+    void restoreNotes (const std::vector<Note>& restoredNotes);
+
+    /** Returns a thread-safe snapshot of the region's notes. */
+    std::vector<Note> getNotesCopy() const;
+
+    /** Converts DAW playback timeline time (seconds) to AudioSource/Modification time (seconds). */
+    double playbackToSourceTime (double playbackTime) const noexcept;
+
+    /** Converts AudioSource/Modification time (seconds) to DAW playback timeline time (seconds). */
+    double sourceToPlaybackTime (double sourceTime) const noexcept;
+
+    /** Computes the required pitch shift (in semitones) at a given source time (seconds). */
     float getPitchShiftSemitones (double timeInSeconds) const;
+
+    /** Returns the spin lock protecting `notes`. */
+    juce::SpinLock& getNotesLock() const noexcept { return notesLock; }
 
     std::vector<Note> notes;
 
 private:
+    mutable juce::SpinLock notesLock;
     std::atomic<bool> analysisCompleted { false };
+    std::atomic<bool> abortAnalysis { false };
     double sourceSampleRate { 44100.0 };
     int64_t sourceLengthSamples { 0 };
 
@@ -160,8 +182,12 @@ public:
     /** Triggers asynchronous pitch analysis on all regions. */
     void triggerAsyncAnalysis();
 
-    const std::vector<PitchTunePluginPlaybackRegion*>& getActivePitchRegions() const noexcept { return activeRegions; }
+    /** Returns a thread-safe snapshot of active playback regions. */
+    std::vector<PitchTunePluginPlaybackRegion*> getActivePitchRegions() const;
     void unregisterRegion (PitchTunePluginPlaybackRegion* region);
+
+    /** Caches region note edits for project persistence and notifies the ARA host. */
+    void cacheRegionNotes (PitchTunePluginPlaybackRegion* region);
 
     void playPreviewNote (int) {}
     void stopPreviewNote() {}
@@ -180,7 +206,12 @@ protected:
 
 private:
     juce::ThreadPool threadPool { 1 };
+    mutable juce::CriticalSection regionLock;
     std::vector<PitchTunePluginPlaybackRegion*> activeRegions;
+    PitchTunePluginPlaybackRegion* currentlyAnalyzingRegion { nullptr };
+    std::map<std::string, std::vector<PitchTunePluginPlaybackRegion::Note>> archivedModificationNotes;
+    std::map<std::string, std::vector<PitchTunePluginPlaybackRegion::Note>> archivedSourceNotes;
+    std::map<std::string, std::string> modToSourceId;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchTunePluginDocumentController)
 };
