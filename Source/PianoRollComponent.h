@@ -185,8 +185,8 @@ private:
     bool isPressingKeyboard { false };
     int pressedKeyboardNote { -1 };
 
-    // Active drag-and-drop state
-    PitchTunePluginPlaybackRegion::Note* activeDragNote { nullptr };
+    // Active drag-and-drop state (stored by index under region notesLock)
+    int activeDragNoteIndex { -1 };
     PitchTunePluginPlaybackRegion* activeDragRegion { nullptr };
     int initialDragNoteMidi { 0 };
     juce::Point<int> dragStartPos;

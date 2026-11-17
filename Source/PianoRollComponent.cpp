@@ -100,6 +100,8 @@ void PianoRollComponent::paint (juce::Graphics& g)
         g.setColour (juce::Colour (0xff2d2d3d));
     }
 
+    bool anyAnalyzing = false;
+
     // Fetch and Draw Playback Regions & Notes from Document Controller
     if (auto* documentController = processor.getPitchDocumentController())
     {
@@ -108,8 +110,18 @@ void PianoRollComponent::paint (juce::Graphics& g)
             if (pitchRegion == nullptr)
                 continue;
 
-            for (auto& note : pitchRegion->notes)
+            if (! pitchRegion->isAnalysisCompleted())
             {
+                anyAnalyzing = true;
+                continue;
+            }
+
+            const juce::SpinLock::ScopedLockType sl (pitchRegion->getNotesLock());
+
+            for (size_t noteIdx = 0; noteIdx < pitchRegion->notes.size(); ++noteIdx)
+            {
+                const auto& note = pitchRegion->notes[noteIdx];
+
                 float x1 = timeToX (note.startTime);
                 float x2 = timeToX (note.endTime);
                 float yTarget = noteToY (note.targetMidiNote);
@@ -126,14 +138,15 @@ void PianoRollComponent::paint (juce::Graphics& g)
                 }
 
                 // Draw target edited note block
-                juce::Colour noteColor = (activeDragNote == &note) ? juce::Colour (0xff00e6ff) : juce::Colour (0xff00a6ff);
+                const bool isDraggingThis = (activeDragRegion == pitchRegion && activeDragNoteIndex == static_cast<int> (noteIdx));
+                juce::Colour noteColor = isDraggingThis ? juce::Colour (0xff00e6ff) : juce::Colour (0xff00a6ff);
                 g.setColour (noteColor.withAlpha (0.45f));
                 g.fillRoundedRectangle (x1, yTarget + 1.0f, w, noteHeight - 2.0f, 4.0f);
                 g.setColour (noteColor);
                 g.drawRoundedRectangle (x1, yTarget + 1.0f, w, noteHeight - 2.0f, 4.0f, 1.5f);
 
                 // Draw pitch curve inside the note block
-                if (!note.pitchCurve.empty())
+                if (! note.pitchCurve.empty())
                 {
                     juce::Path pitchPath;
                     double duration = note.endTime - note.startTime;
@@ -180,6 +193,15 @@ void PianoRollComponent::paint (juce::Graphics& g)
                 g.drawText (labelText, static_cast<int> (x1 + 5), static_cast<int> (yTarget), static_cast<int> (w - 10), static_cast<int> (noteHeight), juce::Justification::left, true);
             }
         }
+    }
+
+    if (anyAnalyzing)
+    {
+        g.setColour (juce::Colour (0xcc121218));
+        g.fillRoundedRectangle (keyboardWidth + 16.0f, 18.0f, 160.0f, 26.0f, 4.0f);
+        g.setColour (juce::Colours::cyan);
+        g.setFont (juce::FontOptions ("Inter", 12.0f, juce::Font::bold));
+        g.drawText ("Analyzing audio...", static_cast<int> (keyboardWidth + 24), 18, 144, 26, juce::Justification::centredLeft);
     }
 
     // Draw Keyboard (Left margin overlay)
@@ -248,33 +270,45 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
 
     double clickedTime = xToTime (static_cast<float> (event.x));
 
-    activeDragNote = nullptr;
+    activeDragNoteIndex = -1;
     activeDragRegion = nullptr;
 
     if (auto* documentController = processor.getPitchDocumentController())
     {
         for (auto* pitchRegion : documentController->getActivePitchRegions())
         {
-            if (pitchRegion == nullptr)
+            if (pitchRegion == nullptr || ! pitchRegion->isAnalysisCompleted())
                 continue;
 
-            for (auto& note : pitchRegion->notes)
+            int matchedNoteMidi = -1;
             {
-                if (clickedTime >= note.startTime && clickedTime <= note.endTime)
+                const juce::SpinLock::ScopedLockType sl (pitchRegion->getNotesLock());
+
+                for (size_t noteIdx = 0; noteIdx < pitchRegion->notes.size(); ++noteIdx)
                 {
-                    // Match note block boundaries
-                    float yTarget = noteToY (note.targetMidiNote);
-                    if (event.y >= yTarget && event.y <= yTarget + noteHeight)
+                    const auto& note = pitchRegion->notes[noteIdx];
+                    if (clickedTime >= note.startTime && clickedTime <= note.endTime)
                     {
-                        activeDragNote = &note;
-                        activeDragRegion = pitchRegion;
-                        initialDragNoteMidi = note.targetMidiNote;
-                        dragStartPos = event.getPosition();
-                        triggerAudition (note.targetMidiNote);
-                        repaint();
-                        return;
+                        // Match note block boundaries
+                        float yTarget = noteToY (note.targetMidiNote);
+                        if (event.y >= yTarget && event.y <= yTarget + noteHeight)
+                        {
+                            activeDragNoteIndex = static_cast<int> (noteIdx);
+                            activeDragRegion = pitchRegion;
+                            initialDragNoteMidi = note.targetMidiNote;
+                            dragStartPos = event.getPosition();
+                            matchedNoteMidi = note.targetMidiNote;
+                            break;
+                        }
                     }
                 }
+            }
+
+            if (activeDragNoteIndex >= 0)
+            {
+                triggerAudition (matchedNoteMidi);
+                repaint();
+                return;
             }
         }
     }
@@ -295,8 +329,28 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
         return;
     }
 
-    if (activeDragNote == nullptr)
+    if (activeDragRegion == nullptr || activeDragNoteIndex < 0)
         return;
+
+    bool regionStillValid = false;
+    if (auto* documentController = processor.getPitchDocumentController())
+    {
+        for (auto* r : documentController->getActivePitchRegions())
+        {
+            if (r == activeDragRegion)
+            {
+                regionStillValid = true;
+                break;
+            }
+        }
+    }
+
+    if (! regionStillValid)
+    {
+        activeDragNoteIndex = -1;
+        activeDragRegion = nullptr;
+        return;
+    }
 
     // Calculate vertical note displacement
     float deltaY = static_cast<float> (event.y - dragStartPos.y);
@@ -304,10 +358,28 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
 
     // Clamp the dragged target note to reasonable musical boundaries
     int newMidiNote = std::clamp (initialDragNoteMidi + semitoneDelta, startNote, startNote + numNotes - 1);
-    
-    if (activeDragNote->targetMidiNote != newMidiNote)
+
+    bool changed = false;
     {
-        activeDragNote->targetMidiNote = newMidiNote;
+        const juce::SpinLock::ScopedLockType sl (activeDragRegion->getNotesLock());
+        if (static_cast<size_t> (activeDragNoteIndex) < activeDragRegion->notes.size())
+        {
+            auto& note = activeDragRegion->notes[static_cast<size_t> (activeDragNoteIndex)];
+            if (note.targetMidiNote != newMidiNote)
+            {
+                note.targetMidiNote = newMidiNote;
+                changed = true;
+            }
+        }
+        else
+        {
+            activeDragNoteIndex = -1;
+            activeDragRegion = nullptr;
+        }
+    }
+
+    if (changed)
+    {
         triggerAudition (newMidiNote);
         repaint();
     }
@@ -325,9 +397,21 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent& event)
         repaint();
     }
 
-    if (activeDragNote != nullptr)
+    if (activeDragRegion != nullptr && activeDragNoteIndex >= 0)
     {
-        activeDragNote = nullptr;
+        if (auto* documentController = processor.getPitchDocumentController())
+        {
+            for (auto* r : documentController->getActivePitchRegions())
+            {
+                if (r == activeDragRegion)
+                {
+                    documentController->cacheRegionNotes (activeDragRegion);
+                    break;
+                }
+            }
+        }
+
+        activeDragNoteIndex = -1;
         activeDragRegion = nullptr;
         endAudition();
         repaint();
