@@ -1,0 +1,39 @@
+PitchTunePlugin
+Copyright (c) 2026 28futaba
+
+This project is licensed under the GNU General Public License v3.0 (GPL-3.0).
+When built and distributed with JUCE 8 (open-source tier), the combined work is
+subject to the GNU Affero General Public License v3.0 (AGPL-3.0).
+
+================================================================================
+Third-Party Software and Licenses
+================================================================================
+
+1. JUCE 8
+   Copyright (c) 2024 - Raw Material Software Limited / PACE Anti-Piracy, Inc.
+   Website: https://juce.com/
+   License: GNU Affero General Public License v3.0 (AGPL-3.0) or Commercial JUCE License
+
+2. ARA Audio Random Access SDK
+   Copyright (c) Celemony Software GmbH. All rights reserved.
+   Website: https://www.celemony.com/en/ara
+   License: Apache License, Version 2.0
+   http://www.apache.org/licenses/LICENSE-2.0
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+       http://www.apache.org/licenses/LICENSE-2.0
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+3. Steinberg VST3 SDK
+   Copyright (c) 2025 Steinberg Media Technologies GmbH
+   Website: https://www.steinberg.net/
+   License: MIT License
+
+   VST is a trademark of Steinberg Media Technologies GmbH, registered in
+   Europe and other countries.

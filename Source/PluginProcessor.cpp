@@ -1,3 +1,15 @@
+/*
+  ==============================================================================
+
+    PluginProcessor.cpp
+    PitchTunePlugin
+    Copyright (c) 2026 28futaba
+
+    This file is part of PitchTunePlugin, licensed under GNU GPL v3.0 (or AGPL v3.0).
+
+  ==============================================================================
+*/
+
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <cmath>
