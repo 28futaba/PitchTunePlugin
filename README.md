@@ -38,7 +38,7 @@ JUCE 8 と Celemony ARA 2.0 SDK を用いて開発されたオフライン手動
 - `Source/PitchDetector.h` / `Source/PitchDetector.cpp`: 自乗差分 (YIN/NSDF) ベースの高精度基本周波数 (F0) 推定エンジン。
 - `Source/PitchShifter.h` / `Source/PitchShifter.cpp`: ピッチシフター DSP (Overlap-Add / Phase Vocoder)。
 - `Source/ARALibraryIncludes.cpp`: Celemony ARA SDK 2.3.0 の実装ソースバンドル。
-- `install_vst3.bat` / `install_vst3.vbs`: ビルドされた VST3 プラグインをシステム共通プラグインフォルダにワンクリックで昇格コピーするインストーラー。
+- `install_vst3.bat`: ビルドされた VST3 プラグインをシステム共通プラグインフォルダにワンクリックで昇格コピーするインストーラー。
 
 ---
 
@@ -83,7 +83,25 @@ MSBuild.exe Builds\VisualStudio2026\PitchTunePlugin.sln /p:Configuration=Release
 
 ---
 
-## 📄 ライセンス
+## 📄 ライセンス・著作権表示 (License & Notices)
 
-本プロジェクトは [GNU General Public License v3.0 (GPL-3.0)](LICENSE) の下で公開されています。
-JUCE 8 および Steinberg VST3 SDK、Celemony ARA SDK のオープンソースライセンス条項に準拠しています。
+本プロジェクトのソースコードは **[GNU General Public License v3.0 (GPL-3.0)](LICENSE)** の下で公開されています。
+
+### サードパーティライセンスと互換性について
+本プラグインのビルドおよび動作には、以下のサードパーティライブラリおよび SDK を使用しています：
+
+| コンポーネント | 著作権者 | ライセンス | 備考 |
+|---|---|---|---|
+| **PitchTunePlugin (本プロジェクト)** | Copyright (c) 2026 28futaba | **GPL-3.0** | 完全なソースコードを本リポジトリで公開しています。 |
+| **JUCE 8** | Copyright (c) 2024 Raw Material Software Limited / PACE Anti-Piracy, Inc. | **AGPL-3.0** / 商用ライセンス | オープンソース版 JUCE 8 に準拠。静的リンクされた配布バイナリは AGPL-3.0 の条件に従います。 |
+| **Celemony ARA SDK** | Copyright (c) Celemony Software GmbH | **Apache 2.0** | GPL-3.0 と互換。詳細は [NOTICE](NOTICE) を参照してください。 |
+| **Steinberg VST3 SDK** | Copyright (c) 2025 Steinberg Media Technologies GmbH | **MIT** | GPL-3.0 と互換。 |
+
+### 商標に関する注記
+- **VST** は Steinberg Media Technologies GmbH の登録商標です。
+- **ARA** (Audio Random Access) は Celemony Software GmbH の技術および商標です。
+- **Melodyne** は Celemony Software GmbH の登録商標です。
+- **Waves Tune** は Waves Audio Ltd. の登録商標です。
+
+### バイナリ配布に関するご案内
+本プラグインのビルド済みバイナリ（`.vst3`）を再配布または利用する場合、GPL-3.0 / AGPL-3.0 の条項に従い、対応する完全なソースコード（本 GitHub リポジトリ: https://github.com/28futaba/PitchTunePlugin ）へのアクセスを提供する必要があります。
