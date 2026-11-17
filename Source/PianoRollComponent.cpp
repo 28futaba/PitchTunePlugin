@@ -204,6 +204,22 @@ void PianoRollComponent::paint (juce::Graphics& g)
         g.drawText ("Analyzing audio...", static_cast<int> (keyboardWidth + 24), 18, 144, 26, juce::Justification::centredLeft);
     }
 
+    // Draw DAW playhead / playback cursor
+    double playheadSec = processor.getFallbackPlayheadSeconds();
+    if (auto* documentController = processor.getPitchDocumentController())
+        playheadSec = documentController->getPlayheadTimeSeconds();
+
+    const float playheadX = timeToX (playheadSec);
+    if (playheadX >= keyboardWidth && playheadX <= static_cast<float> (getWidth()))
+    {
+        g.setColour (juce::Colour (0xffff4455));
+        g.drawVerticalLine (static_cast<int> (std::round (playheadX)), 0.0f, static_cast<float> (getHeight()));
+
+        juce::Path marker;
+        marker.addTriangle (playheadX - 5.0f, 0.0f, playheadX + 5.0f, 0.0f, playheadX, 8.0f);
+        g.fillPath (marker);
+    }
+
     // Draw Keyboard (Left margin overlay)
     g.setColour (juce::Colour (0xff121218));
     g.fillRect (0.0f, 0.0f, keyboardWidth, static_cast<float> (getHeight()));
@@ -250,6 +266,20 @@ void PianoRollComponent::resized()
 
 void PianoRollComponent::timerCallback()
 {
+    double maxDurationSec = 25.0;
+    if (auto* documentController = processor.getPitchDocumentController())
+    {
+        for (auto* pitchRegion : documentController->getActivePitchRegions())
+        {
+            if (pitchRegion != nullptr)
+                maxDurationSec = std::max (maxDurationSec, pitchRegion->getMaxTimelineSeconds() + 2.0);
+        }
+    }
+
+    const int requiredWidth = std::max (3000, static_cast<int> (std::ceil (timeToX (maxDurationSec))));
+    if (std::abs (requiredWidth - getWidth()) > 10 && getHeight() > 0)
+        setSize (requiredWidth, getHeight());
+
     repaint();
 }
 
@@ -428,5 +458,51 @@ void PianoRollComponent::mouseExit (const juce::MouseEvent& event)
         pressedKeyboardNote = -1;
         endAudition();
         repaint();
+    }
+}
+
+void PianoRollComponent::mouseDoubleClick (const juce::MouseEvent& event)
+{
+    if (event.x < keyboardWidth)
+        return;
+
+    const double clickedTime = xToTime (static_cast<float> (event.x));
+
+    if (auto* documentController = processor.getPitchDocumentController())
+    {
+        for (auto* pitchRegion : documentController->getActivePitchRegions())
+        {
+            if (pitchRegion == nullptr || ! pitchRegion->isAnalysisCompleted())
+                continue;
+
+            int resetMidi = -1;
+            {
+                const juce::SpinLock::ScopedLockType sl (pitchRegion->getNotesLock());
+
+                for (auto& note : pitchRegion->notes)
+                {
+                    if (clickedTime >= note.startTime && clickedTime <= note.endTime)
+                    {
+                        const float yTarget = noteToY (note.targetMidiNote);
+                        if (event.y >= yTarget && event.y <= yTarget + noteHeight)
+                        {
+                            note.targetMidiNote = note.originalMidiNote;
+                            resetMidi = note.originalMidiNote;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (resetMidi >= 0)
+            {
+                activeDragNoteIndex = -1;
+                activeDragRegion = nullptr;
+                triggerAudition (resetMidi);
+                documentController->cacheRegionNotes (pitchRegion);
+                repaint();
+                return;
+            }
+        }
     }
 }

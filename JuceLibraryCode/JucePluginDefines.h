@@ -47,10 +47,10 @@
  #define JucePlugin_Desc                   "PitchTunePlugin"
 #endif
 #ifndef  JucePlugin_Manufacturer
- #define JucePlugin_Manufacturer           "yourcompany"
+ #define JucePlugin_Manufacturer           "28futaba"
 #endif
 #ifndef  JucePlugin_ManufacturerWebsite
- #define JucePlugin_ManufacturerWebsite    "www.yourcompany.com"
+ #define JucePlugin_ManufacturerWebsite    "https://github.com/28futaba/PitchTunePlugin"
 #endif
 #ifndef  JucePlugin_ManufacturerEmail
  #define JucePlugin_ManufacturerEmail      ""
@@ -77,13 +77,13 @@
  #define JucePlugin_EditorRequiresKeyboardFocus  0
 #endif
 #ifndef  JucePlugin_Version
- #define JucePlugin_Version                1.0.0
+ #define JucePlugin_Version                1.1.0
 #endif
 #ifndef  JucePlugin_VersionCode
- #define JucePlugin_VersionCode            0x10000
+ #define JucePlugin_VersionCode            0x10100
 #endif
 #ifndef  JucePlugin_VersionString
- #define JucePlugin_VersionString          "1.0.0"
+ #define JucePlugin_VersionString          "1.1.0"
 #endif
 #ifndef  JucePlugin_VSTUniqueID
  #define JucePlugin_VSTUniqueID            JucePlugin_PluginCode
@@ -110,10 +110,10 @@
  #define JucePlugin_AUManufacturerCode     JucePlugin_ManufacturerCode
 #endif
 #ifndef  JucePlugin_CFBundleIdentifier
- #define JucePlugin_CFBundleIdentifier     com.yourcompany.PitchTunePlugin
+ #define JucePlugin_CFBundleIdentifier     com.28futaba.PitchTunePlugin
 #endif
 #ifndef  JucePlugin_AAXIdentifier
- #define JucePlugin_AAXIdentifier          com.yourcompany.PitchTunePlugin
+ #define JucePlugin_AAXIdentifier          com.28futaba.PitchTunePlugin
 #endif
 #ifndef  JucePlugin_AAXManufacturerCode
  #define JucePlugin_AAXManufacturerCode    JucePlugin_ManufacturerCode
@@ -137,7 +137,7 @@
  #define JucePlugin_IAASubType             JucePlugin_PluginCode
 #endif
 #ifndef  JucePlugin_IAAName
- #define JucePlugin_IAAName                "yourcompany: PitchTunePlugin"
+ #define JucePlugin_IAAName                "28futaba: PitchTunePlugin"
 #endif
 #ifndef  JucePlugin_VSTNumMidiInputs
  #define JucePlugin_VSTNumMidiInputs       16
@@ -152,11 +152,11 @@
  #define JucePlugin_ARATransformationFlags  0
 #endif
 #ifndef  JucePlugin_ARAFactoryID
- #define JucePlugin_ARAFactoryID           "com.yourcompany.PitchTunePlugin.factory"
+ #define JucePlugin_ARAFactoryID           "com.28futaba.PitchTunePlugin.factory"
 #endif
 #ifndef  JucePlugin_ARADocumentArchiveID
- #define JucePlugin_ARADocumentArchiveID   "com.yourcompany.PitchTunePlugin.aradocumentarchive.1.0.0"
+ #define JucePlugin_ARADocumentArchiveID   "com.28futaba.PitchTunePlugin.aradocumentarchive.1.1.0"
 #endif
 #ifndef  JucePlugin_ARACompatibleArchiveIDs
- #define JucePlugin_ARACompatibleArchiveIDs  ""
+ #define JucePlugin_ARACompatibleArchiveIDs  "com.yourcompany.PitchTunePlugin.aradocumentarchive.1.0.0"
 #endif

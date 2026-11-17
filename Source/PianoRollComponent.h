@@ -152,11 +152,12 @@ public:
     // Timer callback to poll DAW playback position and refresh region status
     void timerCallback() override;
 
-    // Mouse handlers to audition piano keys and drag/transpose note blocks
+    // Mouse handlers to audition piano keys and drag/transpose/reset note blocks
     void mouseDown (const juce::MouseEvent& event) override;
     void mouseDrag (const juce::MouseEvent& event) override;
     void mouseUp (const juce::MouseEvent& event) override;
     void mouseExit (const juce::MouseEvent& event) override;
+    void mouseDoubleClick (const juce::MouseEvent& event) override;
 
 private:
     // Helper coordinates mappings

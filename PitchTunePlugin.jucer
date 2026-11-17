@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <JUCERPROJECT id="jX9bdM" name="PitchTunePlugin" projectType="audioplug" useAppConfig="0"
-              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" pluginFormats="buildVST3,enableARA" enableARA="1">
+              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" pluginFormats="buildVST3,enableARA"
+              enableARA="1" version="1.1.0" companyName="28futaba"
+              companyWebsite="https://github.com/28futaba/PitchTunePlugin"
+              bundleIdentifier="com.28futaba.PitchTunePlugin"
+              pluginManufacturer="28futaba" aaxIdentifier="com.28futaba.PitchTunePlugin"
+              araFactoryID="com.28futaba.PitchTunePlugin.factory"
+              araDocumentArchiveID="com.28futaba.PitchTunePlugin.aradocumentarchive.1.1.0"
+              araCompatibleArchiveIDs="com.yourcompany.PitchTunePlugin.aradocumentarchive.1.0.0">
   <MAINGROUP id="sI72fB" name="PitchTunePlugin">
     <GROUP id="{2E4919AB-DEB5-7A73-CC46-222A62499523}" name="Source">
       <FILE id="jSq0Ua" name="PluginProcessor.cpp" compile="1" resource="0"

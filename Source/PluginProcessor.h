@@ -82,6 +82,9 @@ public:
     /** Converts AudioSource/Modification time (seconds) to DAW playback timeline time (seconds). */
     double sourceToPlaybackTime (double sourceTime) const noexcept;
 
+    /** Returns the maximum timeline extent (in seconds) of the region's audio/notes. */
+    double getMaxTimelineSeconds() const noexcept;
+
     /** Computes the required pitch shift (in semitones) at a given source time (seconds). */
     float getPitchShiftSemitones (double timeInSeconds) const;
 
@@ -125,6 +128,7 @@ public:
 private:
     double currentSampleRate { 44100.0 };
     int currentSamplesPerBlock { 512 };
+    float smoothedShiftSemitones { 0.0f };
     
     // Audio processing tools per channel
     std::vector<std::unique_ptr<PitchShifter>> shifters;
@@ -189,6 +193,10 @@ public:
     /** Caches region note edits for project persistence and notifies the ARA host. */
     void cacheRegionNotes (PitchTunePluginPlaybackRegion* region);
 
+    /** Stores / retrieves current playhead position in seconds for the UI cursor. */
+    void setPlayheadTimeSeconds (double t) noexcept { playheadTimeSeconds.store (t, std::memory_order_relaxed); }
+    double getPlayheadTimeSeconds() const noexcept { return playheadTimeSeconds.load (std::memory_order_relaxed); }
+
     void playPreviewNote (int) {}
     void stopPreviewNote() {}
     void renderPreview (juce::AudioBuffer<float>&) {}
@@ -212,6 +220,7 @@ private:
     std::map<std::string, std::vector<PitchTunePluginPlaybackRegion::Note>> archivedModificationNotes;
     std::map<std::string, std::vector<PitchTunePluginPlaybackRegion::Note>> archivedSourceNotes;
     std::map<std::string, std::string> modToSourceId;
+    std::atomic<double> playheadTimeSeconds { 0.0 };
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchTunePluginDocumentController)
 };
@@ -273,6 +282,9 @@ public:
 
     PitchTunePluginDocumentController* getPitchDocumentController() const noexcept;
 
+    /** Fallback playhead position in seconds (when running outside ARA). */
+    double getFallbackPlayheadSeconds() const noexcept { return fallbackPlayheadSeconds.load (std::memory_order_relaxed); }
+
     // Preview tone playback control stubs (handled by UI directly)
     void playPreviewNote (int) {}
     void stopPreviewNote() {}
@@ -284,6 +296,7 @@ private:
     PitchShifter fallbackShifters[2];
     float smoothedShiftSemitones { 0.0f };
     double currentSampleRate { 44100.0 };
+    std::atomic<double> fallbackPlayheadSeconds { 0.0 };
 
     // Parameters
     juce::AudioParameterFloat* retuneSpeedParam { nullptr };

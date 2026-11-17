@@ -87,6 +87,25 @@ double PitchTunePluginPlaybackRegion::sourceToPlaybackTime (double sourceTime) c
     return getStartInPlaybackTime() + (sourceTime - getStartInAudioModificationTime()) / scale;
 }
 
+double PitchTunePluginPlaybackRegion::getMaxTimelineSeconds() const noexcept
+{
+    double maxSec = 0.0;
+
+    if (sourceSampleRate > 0.0 && sourceLengthSamples > 0)
+        maxSec = std::max (maxSec, static_cast<double> (sourceLengthSamples) / sourceSampleRate);
+
+    maxSec = std::max (maxSec, getEndInAudioModificationTime());
+
+    const juce::SpinLock::ScopedTryLockType stl (notesLock);
+    if (stl.isLocked())
+    {
+        for (const auto& note : notes)
+            maxSec = std::max (maxSec, note.endTime);
+    }
+
+    return maxSec;
+}
+
 void PitchTunePluginPlaybackRegion::analyzeAudio()
 {
     if (analysisCompleted.load() || abortAnalysis.load())
@@ -110,8 +129,8 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
 
     const int windowSize = 2048;
     const int hopSize = 256; // High time resolution: ~5.8ms at 44.1kHz
-    constexpr size_t kMinNoteFrames = 8;          // ~46ms minimum note length
-    constexpr int kTransitionFramesRequired = 5;  // ~29ms hysteresis to split legato pitch jumps
+    constexpr size_t kMinNoteFrames = 8;           // ~46ms minimum note length
+    constexpr int kTransitionFramesRequired = 5;   // ~29ms hysteresis to split legato pitch jumps
     constexpr float kLegatoSplitThreshold = 0.75f; // Semitones deviation required to trigger split
 
     juce::AudioBuffer<float> windowBuffer (1, windowSize);
@@ -323,6 +342,7 @@ void PitchTunePluginPlaybackRenderer::prepareToPlay (double sampleRate, int maxi
 
     currentSampleRate = (sampleRate > 0.0) ? sampleRate : 44100.0;
     currentSamplesPerBlock = std::max (maximumSamplesPerBlock, 1);
+    smoothedShiftSemitones = 0.0f;
 
     shifters.clear();
     for (int i = 0; i < numChannels; ++i)
@@ -372,6 +392,12 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
     const double sampleDuration = 1.0 / safePlaybackRate;
     const double blockEndTime = blockStartTime + (static_cast<double> (numSamples) * sampleDuration);
 
+    // ~3ms smoothing factor to avoid audible clicks across note boundaries
+    const float smoothCoeff = std::exp (-1.0f / static_cast<float> (std::max (1.0, 0.003 * safePlaybackRate)));
+
+    double uiPlayheadSec = blockStartTime;
+    bool matchedPlayheadRegion = false;
+
     tempProcessingBuffer.setSize (numChannels, numSamples, false, false, true);
 
     for (auto* region : regions)
@@ -408,6 +434,12 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
                                            : (region->getStartInAudioModificationTime() + (playbackOverlapStart - regionStart));
         const int64_t sourceSampleOffset = static_cast<int64_t> (std::llround (sourceStartTime * sourceSampleRate));
 
+        if (! matchedPlayheadRegion)
+        {
+            uiPlayheadSec = sourceStartTime;
+            matchedPlayheadRegion = true;
+        }
+
         tempProcessingBuffer.clear (startSample, overlapSamples);
 
         if (sourceSampleOffset < reader.lengthInSamples)
@@ -434,18 +466,19 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
             continue;
         }
 
-        // Apply pitch shifting per overlapping sample based on note transposition offset
+        // Apply pitch shifting per overlapping sample with ~3ms note-boundary smoothing
         for (int i = startSample; i < endSample; ++i)
         {
             const double playbackTime = blockStartTime + (static_cast<double> (i) * sampleDuration);
             const double sourceTime = pitchRegion->playbackToSourceTime (playbackTime);
             const float shiftAmount = pitchRegion->getPitchShiftSemitones (sourceTime);
+            smoothedShiftSemitones = smoothCoeff * smoothedShiftSemitones + (1.0f - smoothCoeff) * shiftAmount;
 
             for (int ch = 0; ch < numChannels; ++ch)
             {
                 if (ch < static_cast<int> (shifters.size()))
                 {
-                    shifters[ch]->setPitchShift (shiftAmount);
+                    shifters[ch]->setPitchShift (smoothedShiftSemitones);
 
                     const float sampleInput = tempProcessingBuffer.getSample (ch, i);
                     float sampleOutput = 0.0f;
@@ -456,6 +489,9 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
             }
         }
     }
+
+    if (auto* customDoc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<PitchTunePluginDocumentController> (getDocumentController()))
+        customDoc->setPlayheadTimeSeconds (uiPlayheadSec);
 
     return true;
 }
@@ -1125,6 +1161,15 @@ void PitchTunePluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buff
     if (processBlockForARA (buffer, isNonRealtime() ? juce::AudioProcessor::Realtime::no : juce::AudioProcessor::Realtime::yes, getPlayHead()))
     {
         return;
+    }
+
+    if (auto* ph = getPlayHead())
+    {
+        if (auto pos = ph->getPosition())
+        {
+            if (auto t = pos->getTimeInSeconds())
+                fallbackPlayheadSeconds.store (*t, std::memory_order_relaxed);
+        }
     }
 
     auto totalNumInputChannels  = getTotalNumInputChannels();
