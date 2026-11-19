@@ -110,6 +110,8 @@ void PianoRollComponent::paint (juce::Graphics& g)
     // Fetch and Draw Playback Regions & Notes from Document Controller
     if (auto* documentController = processor.getPitchDocumentController())
     {
+        const float correctionAmount = documentController->getPitchCorrectionAmount();
+
         for (auto* pitchRegion : documentController->getActivePitchRegions())
         {
             if (pitchRegion == nullptr)
@@ -121,14 +123,24 @@ void PianoRollComponent::paint (juce::Graphics& g)
                 continue;
             }
 
+            const double modStart = pitchRegion->getStartInAudioModificationTime();
+            const double modEnd = pitchRegion->getEndInAudioModificationTime();
+            const bool hasValidModRange = (modEnd > modStart + 1e-4);
+
             const juce::SpinLock::ScopedLockType sl (pitchRegion->getNotesLock());
 
             for (size_t noteIdx = 0; noteIdx < pitchRegion->notes.size(); ++noteIdx)
             {
                 const auto& note = pitchRegion->notes[noteIdx];
 
-                float x1 = timeToX (note.startTime);
-                float x2 = timeToX (note.endTime);
+                if (hasValidModRange && (note.endTime <= modStart || note.startTime >= modEnd))
+                    continue;
+
+                const double visStartSrc = hasValidModRange ? std::max (note.startTime, modStart) : note.startTime;
+                const double visEndSrc   = hasValidModRange ? std::min (note.endTime, modEnd)     : note.endTime;
+
+                float x1 = timeToX (pitchRegion->sourceToPlaybackTime (visStartSrc));
+                float x2 = timeToX (pitchRegion->sourceToPlaybackTime (visEndSrc));
                 float yTarget = noteWithCentsToY (note.targetMidiNote, note.targetCentsOffset);
                 float yOrig = noteToY (note.originalMidiNote);
                 float w = std::max (4.0f, x2 - x1);
@@ -170,14 +182,18 @@ void PianoRollComponent::paint (juce::Graphics& g)
                             continue;
 
                         double t = note.startTime + (static_cast<double> (idx) * timeStep);
-                        float px = timeToX (t);
+                        if (hasValidModRange && (t < modStart || t > modEnd))
+                            continue;
+
+                        float px = timeToX (pitchRegion->sourceToPlaybackTime (t));
                         
-                        // Calculate instantaneous MIDI note pitch
-                        float midiPitch = 69.0f + 12.0f * std::log2 (freq / 440.0f);
-                        
-                        // Shift visual curve by the note transposition + cent offset
-                        float transposedMidiPitch = midiPitch + semitoneShift;
-                        float py = pitchToY (transposedMidiPitch);
+                        // Calculate instantaneous MIDI note pitch and apply intra-note correction + manual shift
+                        float rawMidiPitch = 69.0f + 12.0f * std::log2 (freq / 440.0f);
+                        float deviation = std::clamp (rawMidiPitch - static_cast<float> (note.originalMidiNote), -2.0f, 2.0f);
+                        float correctedMidiPitch = static_cast<float> (note.originalMidiNote)
+                                                   + deviation * (1.0f - correctionAmount)
+                                                   + semitoneShift;
+                        float py = pitchToY (correctedMidiPitch);
 
                         if (firstPoint)
                         {
@@ -310,7 +326,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
         return;
     }
 
-    double clickedTime = xToTime (static_cast<float> (event.x));
+    const double clickedPlaybackTime = xToTime (static_cast<float> (event.x));
 
     activeDragNoteIndex = -1;
     activeDragRegion = nullptr;
@@ -322,6 +338,13 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
             if (pitchRegion == nullptr || ! pitchRegion->isAnalysisCompleted())
                 continue;
 
+            const double regionStart = pitchRegion->getStartInPlaybackTime();
+            const double regionEnd = pitchRegion->getEndInPlaybackTime();
+            if (regionEnd > regionStart + 1e-4 && (clickedPlaybackTime < regionStart || clickedPlaybackTime > regionEnd))
+                continue;
+
+            const double clickedSourceTime = pitchRegion->playbackToSourceTime (clickedPlaybackTime);
+
             int matchedNoteIdx = -1;
             int matchedNoteMidi = -1;
             float matchedNoteCents = 0.0f;
@@ -331,7 +354,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
                 for (size_t noteIdx = 0; noteIdx < pitchRegion->notes.size(); ++noteIdx)
                 {
                     const auto& note = pitchRegion->notes[noteIdx];
-                    if (clickedTime >= note.startTime && clickedTime <= note.endTime)
+                    if (clickedSourceTime >= note.startTime && clickedSourceTime <= note.endTime)
                     {
                         float yTarget = noteWithCentsToY (note.targetMidiNote, note.targetCentsOffset);
                         if (event.y >= yTarget && event.y <= yTarget + noteHeight)
@@ -349,7 +372,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
             {
                 if (event.mods.isPopupMenu())
                 {
-                    if (pitchRegion->splitNoteAtTime (static_cast<size_t> (matchedNoteIdx), clickedTime))
+                    if (pitchRegion->splitNoteAtTime (static_cast<size_t> (matchedNoteIdx), clickedSourceTime))
                     {
                         documentController->cacheRegionNotes (pitchRegion);
                         repaint();
@@ -511,7 +534,7 @@ void PianoRollComponent::mouseDoubleClick (const juce::MouseEvent& event)
     if (event.x < keyboardWidth)
         return;
 
-    const double clickedTime = xToTime (static_cast<float> (event.x));
+    const double clickedPlaybackTime = xToTime (static_cast<float> (event.x));
 
     if (auto* documentController = processor.getPitchDocumentController())
     {
@@ -520,13 +543,20 @@ void PianoRollComponent::mouseDoubleClick (const juce::MouseEvent& event)
             if (pitchRegion == nullptr || ! pitchRegion->isAnalysisCompleted())
                 continue;
 
+            const double regionStart = pitchRegion->getStartInPlaybackTime();
+            const double regionEnd = pitchRegion->getEndInPlaybackTime();
+            if (regionEnd > regionStart + 1e-4 && (clickedPlaybackTime < regionStart || clickedPlaybackTime > regionEnd))
+                continue;
+
+            const double clickedSourceTime = pitchRegion->playbackToSourceTime (clickedPlaybackTime);
+
             int resetMidi = -1;
             {
                 const juce::SpinLock::ScopedLockType sl (pitchRegion->getNotesLock());
 
                 for (auto& note : pitchRegion->notes)
                 {
-                    if (clickedTime >= note.startTime && clickedTime <= note.endTime)
+                    if (clickedSourceTime >= note.startTime && clickedSourceTime <= note.endTime)
                     {
                         const float yTarget = noteWithCentsToY (note.targetMidiNote, note.targetCentsOffset);
                         if (event.y >= yTarget && event.y <= yTarget + noteHeight)

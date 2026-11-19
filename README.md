@@ -5,19 +5,25 @@ JUCE 8 と Celemony ARA 2.0 SDK を用いて開発されたオフライン手動
 
 ---
 
-## 🌟 主な特徴
+## 🌟 主な特徴 (v1.2.0)
 
 - **ARA 2.0 (Audio Random Access) 完全対応**
   - DAW（Studio One, Reaper, Cubase, Logic Pro 等）のオーディオトラックやクリップと直接同期。
-  - 音声クリップを自動解析し、ノート情報と詳細なピッチ軌跡（セント単位）を取得。
+  - 音声クリップを自動解析し、ノート情報と詳細なピッチ軌跡を取得。レガート歌唱の自動分割にも対応。
+  - DAW タイムライン上のクリップ移動・分割・トリミング位置に合わせて複数クリップを正確に配置表示。
+  - 編集したピッチ・ノート分割内容は DAW プロジェクト保存時に自動で保存・復元。
 - **直感的なピアノロール GUI エディタ**
-  - C2〜C7 のピアノキーボードと秒単位のタイムライングリッド。
+  - C2〜C7 のピアノキーボードと秒単位のタイムライングリッド（長尺トラックに合わせた自動幅拡張・再生ヘッド表示・リサイズ対応）。
+  - 起動時は実用的なボーカル中央音域（C4 付近）に自動スクロール表示。
   - 解析された音符がノートブロックおよびピッチ軌跡（黄色曲線）として可視化。
-- **ドラッグ＆ドロップによる音高変更（転調・ピッチ補正）**
-  - ノートブロックを上下にドラッグするだけで、瞬時に目的の音階（MIDI Note）へピッチシフト。
-  - 移動前の音高はゴーストブロックとして残るため、変更差分を視覚的に把握可能。
-- **リアルタイム再生レンダリング (`ARAPlaybackRenderer`)**
-  - DAW の再生ヘッドと同期し、ユーザーの編集内容に合わせてピッチシフト DSP を適用したオーディオをリアルタイム出力。
+- **多彩なピッチ編集操作**
+  - **上下ドラッグ**: 半音単位での転調・音高変更（元の位置をゴースト表示）。
+  - **`Alt + 上下ドラッグ`**: セント単位での微調整（`+15c` のように差分表示）。
+  - **右クリック**: クリックした位置でノートを手動 2 分割。
+  - **ダブルクリック**: 編集したノートの音程・セントを元の位置へワンタッチリセット。
+  - **Center スライダー (0〜100%)**: ノート内の音程の揺れ・ズレを目標音程の中心へ自動補正（ピッチ軌跡も連動表示）。
+- **位相連続ピッチシフター (`PitchShifter`)**
+  - 補正あり・補正なし（0半音）の境界でも常に一定レイテンシを保ち、ノート境界のタイミング段差やクリックノイズを低減。
 - **リアルタイムフォールバックモード**
   - ARA 非対応の DAW ホストや通常インサート時でも、自動ピッチ補正（オートチューン）として動作するデュアルモード設計。
 
@@ -27,17 +33,16 @@ JUCE 8 と Celemony ARA 2.0 SDK を用いて開発されたオフライン手動
 
 - `Source/PluginProcessor.h` / `Source/PluginProcessor.cpp`:
   - `juce::AudioProcessorARAExtension` を継承したメインプロセッサ。
-  - `PitchTunePluginPlaybackRegion`: DAW クリップごとの解析・ノート管理。
-  - `PitchTunePluginPlaybackRenderer`: 再生時のピッチシフトレンダリング。
-  - `PitchTunePluginDocumentController`: ドキュメント全体の統括とバックグラウンド解析スレッド。
+  - `PitchTunePluginPlaybackRegion`: DAW クリップごとの解析・ノート管理・手動分割・セント補正計算。
+  - `PitchTunePluginPlaybackRenderer`: 再生時のピッチシフトレンダリング（タイムライン／トリミング対応）。
+  - `PitchTunePluginDocumentController`: ドキュメント全体の統括、ARA アーカイブ保存・復元、バックグラウンド解析スレッド。
 - `Source/PluginEditor.h` / `Source/PluginEditor.cpp`:
-  - `juce::AudioProcessorEditorARAExtension` を継承したプラグイン GUI。
-  - スクロール可能な Viewport とピアノロールを統合。
+  - `juce::AudioProcessorEditorARAExtension` を継承したリサイズ可能なプラグイン GUI（Center スライダー・操作ヒント付き）。
 - `Source/PianoRollComponent.h` / `Source/PianoRollComponent.cpp`:
-  - ピアノロール描画、マウスドラッグによる音符移動、ピッチカーブのリアルタイム描画。
-- `Source/PitchDetector.h` / `Source/PitchDetector.cpp`: 自乗差分 (YIN/NSDF) ベースの高精度基本周波数 (F0) 推定エンジン。
-- `Source/PitchShifter.h` / `Source/PitchShifter.cpp`: ピッチシフター DSP (Overlap-Add / Phase Vocoder)。
-- `Source/ARALibraryIncludes.cpp`: Celemony ARA SDK 2.3.0 の実装ソースバンドル。
+  - ピアノロール描画、ドラッグ転調、`Alt+ドラッグ` セント調整、右クリック分割、ダブルクリックリセット、再生ヘッド描画。
+- `Source/PitchDetector.h` / `Source/PitchDetector.cpp`: 自己差分 (YIN/NSDF) ベースの高精度基本周波数 (F0) 推定エンジン。
+- `Source/PitchShifter.h` / `Source/PitchShifter.cpp`: 定遅延クロスフェード型ディレイライン・ピッチシフター DSP。
+- `Source/ARALibraryIncludes.cpp`: JUCE 8 標準バンドルとの重複リンク警告を防ぐための ARA SDK スタブ（ライセンス注記保持）。
 - `install_vst3.bat`: ビルドされた VST3 プラグインをシステム共通プラグインフォルダにワンクリックで昇格コピーするインストーラー。
 
 ---
@@ -76,8 +81,8 @@ MSBuild.exe Builds\VisualStudio2026\PitchTunePlugin.sln /p:Configuration=Release
 2. **DAW での読み込み**:
    - Studio One / Reaper / Cubase 等の ARA 2.0 対応 DAW で、ボーカルオーディオイベントに対して **ARA プラグイン / Melodyne 拡張スロット** として `PitchTunePlugin` を挿入します。
 3. **編集**:
-   - プラグイン画面にボーカルのノートブロックとピッチ軌跡が表示されます。
-   - ノートブロックを上下にドラッグしてピッチを補正・転調します。
+   - エディタ画面にボーカルのノートブロックとピッチ軌跡が表示されます。
+   - **ドラッグ**: 半音移動 / **`Alt + ドラッグ`**: セント微調整 / **右クリック**: ノート分割 / **ダブルクリック**: リセット / **Center スライダー**: ノート内の揺れ補正強度を調整します。
 4. **再生**:
    - DAW の再生ボタンを押すと、補正された音声がリアルタイムで再生されます。
 

@@ -28,7 +28,9 @@ PitchShifter::~PitchShifter()
 
 void PitchShifter::prepare (double sampleRateIn, int maxBlockSize)
 {
-    sampleRate = sampleRateIn;
+    (void) maxBlockSize;
+
+    sampleRate = (sampleRateIn > 0.0) ? sampleRateIn : 44100.0;
     
     // Set a window size of approximately 40ms.
     windowSizeSamples = static_cast<float> (sampleRate * 0.040); 
@@ -38,7 +40,7 @@ void PitchShifter::prepare (double sampleRateIn, int maxBlockSize)
     
     writeIndex = 0;
     phase1 = 0.0f;
-    phase2 = 0.5f; // 180 degrees out of phase
+    phase2 = 0.5f; // Single stationary center tap (w1 = 0.0, w2 = 1.0)
     
     pitchShiftSemitones = 0.0f;
     pitchShiftRatio = 1.0f;
@@ -76,60 +78,67 @@ float PitchShifter::readDelayLine (float delayInSamples)
 
 void PitchShifter::process (const float* inputSamples, float* outputSamples, int numSamples)
 {
-    if (numSamples <= 0)
+    if (numSamples <= 0 || windowSizeSamples <= 1.0f)
         return;
 
-    // Check input energy (silence gate) to avoid modulating floor noise
-    float maxAbs = 0.0f;
-    for (int i = 0; i < numSamples; ++i)
-    {
-        float val = std::abs (inputSamples[i]);
-        if (val > maxAbs)
-            maxAbs = val;
-    }
-
-    // Direct bypass when pitch shift is 0 semitones or input is silent
-    if (std::abs (pitchShiftSemitones) < 0.01f || maxAbs < 1e-4f)
-    {
-        if (inputSamples != outputSamples)
-            std::copy (inputSamples, inputSamples + numSamples, outputSamples);
-
-        // Keep delay line updated so transitions to pitch shift are smooth
-        for (int i = 0; i < numSamples; ++i)
-        {
-            delayBuffer[writeIndex] = inputSamples[i];
-            writeIndex = (writeIndex + 1) % bufferSize;
-        }
-        return;
-    }
-
-    float s = pitchShiftRatio;
-    float phaseStep = (1.0f - s) / windowSizeSamples;
     const float minDelayOffset = 32.0f;
+    float phaseStep = 0.0f;
+
+    if (std::abs (pitchShiftSemitones) < 0.001f)
+    {
+        // Keep constant latency (~20ms) when unshifted so transitions between
+        // shifted and unshifted notes never introduce a ~20ms timing/phase jump.
+        const float w1Now = std::abs (std::sin (static_cast<float> (M_PI) * phase1));
+        const float w2Now = std::abs (std::sin (static_cast<float> (M_PI) * phase2));
+
+        if (w1Now < 0.02f)
+        {
+            phase1 = 0.0f;
+            phase2 = 0.5f;
+            phaseStep = 0.0f;
+        }
+        else if (w2Now < 0.02f)
+        {
+            phase2 = 0.0f;
+            phase1 = 0.5f;
+            phaseStep = 0.0f;
+        }
+        else
+        {
+            phaseStep = 0.008f / windowSizeSamples;
+        }
+    }
+    else
+    {
+        phaseStep = (1.0f - pitchShiftRatio) / windowSizeSamples;
+    }
 
     for (int i = 0; i < numSamples; ++i)
     {
         // Must preserve raw input before overwriting outputSamples (in-place buffer safety)
-        float inSample = inputSamples[i];
+        const float inSample = inputSamples[i];
 
-        phase1 += phaseStep;
-        phase2 += phaseStep;
+        if (phaseStep != 0.0f)
+        {
+            phase1 += phaseStep;
+            phase2 += phaseStep;
 
-        if (phase1 >= 1.0f) phase1 -= 1.0f;
-        else if (phase1 < 0.0f) phase1 += 1.0f;
+            if (phase1 >= 1.0f) phase1 -= 1.0f;
+            else if (phase1 < 0.0f) phase1 += 1.0f;
 
-        if (phase2 >= 1.0f) phase2 -= 1.0f;
-        else if (phase2 < 0.0f) phase2 += 1.0f;
+            if (phase2 >= 1.0f) phase2 -= 1.0f;
+            else if (phase2 < 0.0f) phase2 += 1.0f;
+        }
 
-        float delay1 = minDelayOffset + phase1 * windowSizeSamples;
-        float delay2 = minDelayOffset + phase2 * windowSizeSamples;
+        const float delay1 = minDelayOffset + phase1 * windowSizeSamples;
+        const float delay2 = minDelayOffset + phase2 * windowSizeSamples;
 
-        float out1 = readDelayLine (delay1);
-        float out2 = readDelayLine (delay2);
+        const float out1 = readDelayLine (delay1);
+        const float out2 = readDelayLine (delay2);
 
-        float w1 = std::sin (static_cast<float> (M_PI) * phase1);
-        float w2 = std::sin (static_cast<float> (M_PI) * phase2);
-        float wSum = w1 + w2;
+        float w1 = std::abs (std::sin (static_cast<float> (M_PI) * phase1));
+        float w2 = std::abs (std::sin (static_cast<float> (M_PI) * phase2));
+        const float wSum = w1 + w2;
         if (wSum > 1e-6f)
         {
             w1 /= wSum;

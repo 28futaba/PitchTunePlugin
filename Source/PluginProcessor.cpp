@@ -169,18 +169,32 @@ double PitchTunePluginPlaybackRegion::sourceToPlaybackTime (double sourceTime) c
 
 double PitchTunePluginPlaybackRegion::getMaxTimelineSeconds() const noexcept
 {
-    double maxSec = 0.0;
+    const double playbackEnd = getEndInPlaybackTime();
+    const double modStart = getStartInAudioModificationTime();
+    const double modEnd = getEndInAudioModificationTime();
+    const bool hasValidPlayback = (getDurationInPlaybackTime() > 1e-6);
+    const bool hasValidModRange = (modEnd > modStart + 1e-4);
+
+    double maxSec = hasValidPlayback ? playbackEnd : modEnd;
 
     if (sourceSampleRate > 0.0 && sourceLengthSamples > 0)
-        maxSec = std::max (maxSec, static_cast<double> (sourceLengthSamples) / sourceSampleRate);
-
-    maxSec = std::max (maxSec, getEndInAudioModificationTime());
+    {
+        const double sourceDuration = static_cast<double> (sourceLengthSamples) / sourceSampleRate;
+        if (! hasValidPlayback)
+            maxSec = std::max (maxSec, sourceDuration);
+    }
 
     const juce::SpinLock::ScopedTryLockType stl (notesLock);
     if (stl.isLocked())
     {
         for (const auto& note : notes)
-            maxSec = std::max (maxSec, note.endTime);
+        {
+            if (hasValidModRange && (note.endTime <= modStart || note.startTime >= modEnd))
+                continue;
+
+            const double visEndSrc = hasValidModRange ? std::min (note.endTime, modEnd) : note.endTime;
+            maxSec = std::max (maxSec, sourceToPlaybackTime (visEndSrc));
+        }
     }
 
     return maxSec;
@@ -381,7 +395,7 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
     }
 }
 
-float PitchTunePluginPlaybackRegion::getPitchShiftSemitones (double timeInSeconds) const
+float PitchTunePluginPlaybackRegion::getPitchShiftSemitones (double timeInSeconds, float correctionAmount) const
 {
     if (! analysisCompleted.load())
         return 0.0f;
@@ -395,9 +409,42 @@ float PitchTunePluginPlaybackRegion::getPitchShiftSemitones (double timeInSecond
     {
         if (timeInSeconds >= note.startTime && timeInSeconds <= note.endTime)
         {
-            // Shift by manual transposition plus fine cent offset
-            return static_cast<float> (note.targetMidiNote - note.originalMidiNote)
-                   + (note.targetCentsOffset / 100.0f);
+            const float manualShift = static_cast<float> (note.targetMidiNote - note.originalMidiNote)
+                                      + (note.targetCentsOffset / 100.0f);
+            const float clampedCorrection = std::clamp (correctionAmount, 0.0f, 1.0f);
+
+            if (clampedCorrection <= 0.0f || note.pitchCurve.empty())
+                return manualShift;
+
+            float interpFreq = 0.0f;
+            if (note.pitchCurve.size() == 1 || note.endTime <= note.startTime + 1e-6)
+            {
+                interpFreq = note.pitchCurve.front();
+            }
+            else
+            {
+                const double normPos = std::clamp ((timeInSeconds - note.startTime) / (note.endTime - note.startTime), 0.0, 1.0);
+                const double floatIdx = normPos * static_cast<double> (note.pitchCurve.size() - 1);
+                const size_t idx0 = static_cast<size_t> (std::floor (floatIdx));
+                const size_t idx1 = std::min (idx0 + 1, note.pitchCurve.size() - 1);
+                const float frac = static_cast<float> (floatIdx - static_cast<double> (idx0));
+                const float f0 = note.pitchCurve[idx0];
+                const float f1 = note.pitchCurve[idx1];
+
+                if (f0 > 0.0f && f1 > 0.0f)
+                    interpFreq = f0 + frac * (f1 - f0);
+                else
+                    interpFreq = (f0 > 0.0f) ? f0 : f1;
+            }
+
+            if (interpFreq > 0.0f)
+            {
+                const float currentMidiPitch = 69.0f + 12.0f * std::log2 (interpFreq / 440.0f);
+                const float deviation = std::clamp (currentMidiPitch - static_cast<float> (note.originalMidiNote), -2.0f, 2.0f);
+                return manualShift - (clampedCorrection * deviation);
+            }
+
+            return manualShift;
         }
     }
     return 0.0f;
@@ -477,8 +524,8 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
     // ~3ms smoothing factor to avoid audible clicks across note boundaries
     const float smoothCoeff = std::exp (-1.0f / static_cast<float> (std::max (1.0, 0.003 * safePlaybackRate)));
 
-    double uiPlayheadSec = blockStartTime;
-    bool matchedPlayheadRegion = false;
+    auto* customDoc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<PitchTunePluginDocumentController> (getDocumentController());
+    const float correctionAmount = (customDoc != nullptr) ? customDoc->getPitchCorrectionAmount() : 0.85f;
 
     tempProcessingBuffer.setSize (numChannels, numSamples, false, false, true);
 
@@ -516,12 +563,6 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
                                            : (region->getStartInAudioModificationTime() + (playbackOverlapStart - regionStart));
         const int64_t sourceSampleOffset = static_cast<int64_t> (std::llround (sourceStartTime * sourceSampleRate));
 
-        if (! matchedPlayheadRegion)
-        {
-            uiPlayheadSec = sourceStartTime;
-            matchedPlayheadRegion = true;
-        }
-
         tempProcessingBuffer.clear (startSample, overlapSamples);
 
         if (sourceSampleOffset < reader.lengthInSamples)
@@ -553,7 +594,7 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
         {
             const double playbackTime = blockStartTime + (static_cast<double> (i) * sampleDuration);
             const double sourceTime = pitchRegion->playbackToSourceTime (playbackTime);
-            const float shiftAmount = pitchRegion->getPitchShiftSemitones (sourceTime);
+            const float shiftAmount = pitchRegion->getPitchShiftSemitones (sourceTime, correctionAmount);
             smoothedShiftSemitones = smoothCoeff * smoothedShiftSemitones + (1.0f - smoothCoeff) * shiftAmount;
 
             for (int ch = 0; ch < numChannels; ++ch)
@@ -572,8 +613,8 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
         }
     }
 
-    if (auto* customDoc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<PitchTunePluginDocumentController> (getDocumentController()))
-        customDoc->setPlayheadTimeSeconds (uiPlayheadSec);
+    if (customDoc != nullptr)
+        customDoc->setPlayheadTimeSeconds (blockStartTime);
 
     return true;
 }
@@ -1103,6 +1144,14 @@ PitchTunePluginAudioProcessor::PitchTunePluginAudioProcessor()
         { "Chromatic", "C Major" },
         0
     ));
+
+    addParameter (correctionAmountParam = new juce::AudioParameterFloat (
+        "correction_amount",
+        "Correction",
+        0.0f,
+        100.0f,
+        85.0f
+    ));
 }
 
 PitchTunePluginAudioProcessor::~PitchTunePluginAudioProcessor()
@@ -1242,6 +1291,12 @@ void PitchTunePluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buff
     juce::ignoreUnused (midiMessages);
     juce::ScopedNoDenormals noDenormals;
 
+    if (correctionAmountParam != nullptr)
+    {
+        if (auto* customDoc = getPitchDocumentController())
+            customDoc->setPitchCorrectionAmount (correctionAmountParam->get() / 100.0f);
+    }
+
     if (processBlockForARA (buffer, isNonRealtime() ? juce::AudioProcessor::Realtime::no : juce::AudioProcessor::Realtime::yes, getPlayHead()))
     {
         return;
@@ -1281,7 +1336,9 @@ void PitchTunePluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buff
     float targetShiftSemitones = 0.0f;
     if (detectedFreq > 0.0f && targetFreq > 0.0f)
     {
-        targetShiftSemitones = 12.0f * std::log2 (targetFreq / detectedFreq);
+        const float rawShift = 12.0f * std::log2 (targetFreq / detectedFreq);
+        const float correctionFactor = (correctionAmountParam != nullptr) ? (correctionAmountParam->get() / 100.0f) : 0.85f;
+        targetShiftSemitones = rawShift * std::clamp (correctionFactor, 0.0f, 1.0f);
     }
     
     if (std::isnan (targetShiftSemitones) || std::isinf (targetShiftSemitones))
@@ -1330,6 +1387,8 @@ void PitchTunePluginAudioProcessor::getStateInformation (juce::MemoryBlock& dest
     std::unique_ptr<juce::XmlElement> xml (new juce::XmlElement ("PitchTunePluginSettings"));
     xml->setAttribute ("retuneSpeed", (double) retuneSpeedParam->get());
     xml->setAttribute ("scaleIndex", scaleParam->getIndex());
+    if (correctionAmountParam != nullptr)
+        xml->setAttribute ("correctionAmount", (double) correctionAmountParam->get());
     copyXmlToBinary (*xml, destData);
 }
 
@@ -1343,6 +1402,14 @@ void PitchTunePluginAudioProcessor::setStateInformation (const void* data, int s
             retuneSpeedParam->setValueNotifyingHost (
                 (float) xmlState->getDoubleAttribute ("retuneSpeed", 20.0) / 300.0f);
             *scaleParam = xmlState->getIntAttribute ("scaleIndex", 0);
+
+            if (correctionAmountParam != nullptr)
+            {
+                const float savedCorrection = std::clamp (static_cast<float> (xmlState->getDoubleAttribute ("correctionAmount", 85.0)), 0.0f, 100.0f);
+                *correctionAmountParam = savedCorrection;
+                if (auto* customDoc = getPitchDocumentController())
+                    customDoc->setPitchCorrectionAmount (savedCorrection / 100.0f);
+            }
         }
     }
 }

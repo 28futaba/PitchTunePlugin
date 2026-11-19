@@ -44,10 +44,12 @@ private:
     // Custom piano roll grid
     PianoRollComponent pianoRoll;
 
-    // Header buttons and labels
+    // Header controls and labels
     juce::TextButton analyzeButton;
     juce::Label titleLabel;
     juce::Label hintLabel;
+    juce::Label correctionLabel;
+    juce::Slider correctionSlider;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchTunePluginAudioProcessorEditor)
 };

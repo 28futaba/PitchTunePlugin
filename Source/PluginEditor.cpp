@@ -13,6 +13,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <algorithm>
+#include <cmath>
 
 //==============================================================================
 PitchTunePluginAudioProcessorEditor::PitchTunePluginAudioProcessorEditor (PitchTunePluginAudioProcessor& p)
@@ -29,11 +30,41 @@ PitchTunePluginAudioProcessorEditor::PitchTunePluginAudioProcessorEditor (PitchT
 
     // Setup editing hint label
     hintLabel.setText ("Drag: Semitone | Alt+Drag: Cents | Right-Click: Split | Double-Click: Reset", juce::dontSendNotification);
-    hintLabel.setFont (juce::FontOptions ("Inter", 11.5f, juce::Font::plain));
+    hintLabel.setFont (juce::FontOptions ("Inter", 11.0f, juce::Font::plain));
     hintLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9a9ab0));
     hintLabel.setJustificationType (juce::Justification::centredLeft);
-    hintLabel.setMinimumHorizontalScale (0.7f);
+    hintLabel.setMinimumHorizontalScale (0.55f);
     addAndMakeVisible (hintLabel);
+
+    // Setup intra-note pitch centering slider
+    correctionLabel.setText ("Center:", juce::dontSendNotification);
+    correctionLabel.setFont (juce::FontOptions ("Inter", 12.0f, juce::Font::bold));
+    correctionLabel.setColour (juce::Label::textColourId, juce::Colour (0xffccccdd));
+    correctionLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (correctionLabel);
+
+    correctionSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    correctionSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 46, 22);
+    correctionSlider.setRange (0.0, 100.0, 1.0);
+    correctionSlider.setTextValueSuffix ("%");
+
+    const float initialPct = (audioProcessor.getCorrectionAmountParameter() != nullptr)
+                                 ? audioProcessor.getCorrectionAmountParameter()->get()
+                                 : 85.0f;
+    correctionSlider.setValue (initialPct, juce::dontSendNotification);
+    if (auto* docController = audioProcessor.getPitchDocumentController())
+        docController->setPitchCorrectionAmount (initialPct / 100.0f);
+
+    correctionSlider.onValueChange = [this]
+    {
+        const float pct = static_cast<float> (correctionSlider.getValue());
+        if (auto* param = audioProcessor.getCorrectionAmountParameter())
+            *param = pct;
+        if (auto* docController = audioProcessor.getPitchDocumentController())
+            docController->setPitchCorrectionAmount (pct / 100.0f);
+        pianoRoll.repaint();
+    };
+    addAndMakeVisible (correctionSlider);
 
     // Setup analyze/trigger button
     analyzeButton.setButtonText ("Analyze Track");
@@ -55,7 +86,7 @@ PitchTunePluginAudioProcessorEditor::PitchTunePluginAudioProcessorEditor (PitchT
     // Enable plugin window resizing and center initial scroll around vocal middle C (C4)
     setResizable (true, true);
     setResizeLimits (560, 340, 2560, 1440);
-    setSize (760, 500);
+    setSize (840, 520);
 
     const int c4Y = (61 - 1 - (60 - 36)) * 18;
     viewport.setViewPosition (0, std::max (0, c4Y - ((getHeight() - 40) / 2)));
@@ -85,10 +116,14 @@ void PitchTunePluginAudioProcessorEditor::resized()
     
     // Header layout
     auto headerArea = area.removeFromTop (40).reduced (10, 5);
-    titleLabel.setBounds (headerArea.removeFromLeft (200));
-    analyzeButton.setBounds (headerArea.removeFromRight (120));
+    titleLabel.setBounds (headerArea.removeFromLeft (185));
+    analyzeButton.setBounds (headerArea.removeFromRight (105));
+    headerArea.removeFromRight (8);
+    correctionSlider.setBounds (headerArea.removeFromRight (150));
+    correctionLabel.setBounds (headerArea.removeFromRight (52));
     headerArea.removeFromLeft (8);
     headerArea.removeFromRight (8);
+    hintLabel.setVisible (headerArea.getWidth() >= 110);
     hintLabel.setBounds (headerArea);
 
     // Viewport layout (everything else)
@@ -97,5 +132,15 @@ void PitchTunePluginAudioProcessorEditor::resized()
 
 void PitchTunePluginAudioProcessorEditor::timerCallback()
 {
+    if (auto* param = audioProcessor.getCorrectionAmountParameter())
+    {
+        const float paramPct = param->get();
+        if (! correctionSlider.isMouseButtonDown() && std::abs (correctionSlider.getValue() - paramPct) >= 0.5)
+            correctionSlider.setValue (paramPct, juce::dontSendNotification);
+
+        if (auto* docController = audioProcessor.getPitchDocumentController())
+            docController->setPitchCorrectionAmount (paramPct / 100.0f);
+    }
+
     repaint();
 }

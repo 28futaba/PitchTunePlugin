@@ -90,7 +90,7 @@ public:
     double getMaxTimelineSeconds() const noexcept;
 
     /** Computes the required pitch shift (in semitones) at a given source time (seconds). */
-    float getPitchShiftSemitones (double timeInSeconds) const;
+    float getPitchShiftSemitones (double timeInSeconds, float correctionAmount = 0.85f) const;
 
     /** Returns the spin lock protecting `notes`. */
     juce::SpinLock& getNotesLock() const noexcept { return notesLock; }
@@ -201,6 +201,10 @@ public:
     void setPlayheadTimeSeconds (double t) noexcept { playheadTimeSeconds.store (t, std::memory_order_relaxed); }
     double getPlayheadTimeSeconds() const noexcept { return playheadTimeSeconds.load (std::memory_order_relaxed); }
 
+    /** Stores / retrieves intra-note pitch centering strength (0.0 to 1.0). */
+    void setPitchCorrectionAmount (float amount) noexcept { pitchCorrectionAmount.store (std::clamp (amount, 0.0f, 1.0f), std::memory_order_relaxed); }
+    float getPitchCorrectionAmount() const noexcept { return pitchCorrectionAmount.load (std::memory_order_relaxed); }
+
     void playPreviewNote (int) {}
     void stopPreviewNote() {}
     void renderPreview (juce::AudioBuffer<float>&) {}
@@ -225,6 +229,7 @@ private:
     std::map<std::string, std::vector<PitchTunePluginPlaybackRegion::Note>> archivedSourceNotes;
     std::map<std::string, std::string> modToSourceId;
     std::atomic<double> playheadTimeSeconds { 0.0 };
+    std::atomic<float> pitchCorrectionAmount { 0.85f };
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchTunePluginDocumentController)
 };
@@ -277,6 +282,7 @@ public:
     // Parameter accessors
     juce::RangedAudioParameter* getRetuneSpeedParameter() const { return retuneSpeedParam; }
     juce::RangedAudioParameter* getScaleParameter() const { return scaleParam; }
+    juce::AudioParameterFloat* getCorrectionAmountParameter() const noexcept { return correctionAmountParam; }
 
     // Frequency to musical note utility
     static juce::String getNoteNameFromFrequency (float freq);
@@ -305,6 +311,7 @@ private:
     // Parameters
     juce::AudioParameterFloat* retuneSpeedParam { nullptr };
     juce::AudioParameterChoice* scaleParam { nullptr };
+    juce::AudioParameterFloat* correctionAmountParam { nullptr };
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchTunePluginAudioProcessor)
