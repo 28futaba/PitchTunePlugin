@@ -136,7 +136,8 @@ private:
 //==============================================================================
 /**
     A timeline component that draws a grid of MIDI notes (vertical) against time in seconds (horizontal).
-    It renders detected audio blocks as rectangles with pitch curve overlays and handles drag-to-transpose.
+    It renders detected audio blocks as rectangles with pitch curve overlays and handles drag-to-transpose,
+    Alt+drag fine cent tuning, right-click note splitting, and double-click pitch reset.
     Also handles clicking/dragging on the piano keys on the left margin to audition notes.
 */
 class PianoRollComponent : public juce::Component,
@@ -152,7 +153,7 @@ public:
     // Timer callback to poll DAW playback position and refresh region status
     void timerCallback() override;
 
-    // Mouse handlers to audition piano keys and drag/transpose/reset note blocks
+    // Mouse handlers to audition piano keys and drag/split/reset note blocks
     void mouseDown (const juce::MouseEvent& event) override;
     void mouseDrag (const juce::MouseEvent& event) override;
     void mouseUp (const juce::MouseEvent& event) override;
@@ -164,6 +165,7 @@ private:
     float timeToX (double timeInSeconds) const noexcept;
     double xToTime (float x) const noexcept;
     float noteToY (int midiNote) const noexcept;
+    float noteWithCentsToY (int midiNote, float centsOffset) const noexcept;
     float pitchToY (float midiPitch) const noexcept;
     int yToNote (float y) const noexcept;
 
@@ -190,6 +192,7 @@ private:
     int activeDragNoteIndex { -1 };
     PitchTunePluginPlaybackRegion* activeDragRegion { nullptr };
     int initialDragNoteMidi { 0 };
+    float initialDragNoteCents { 0.0f };
     juce::Point<int> dragStartPos;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PianoRollComponent)

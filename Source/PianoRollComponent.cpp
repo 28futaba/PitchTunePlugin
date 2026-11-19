@@ -55,6 +55,11 @@ float PianoRollComponent::noteToY (int midiNote) const noexcept
     return static_cast<float> (numNotes - 1 - noteOffset) * noteHeight;
 }
 
+float PianoRollComponent::noteWithCentsToY (int midiNote, float centsOffset) const noexcept
+{
+    return noteToY (midiNote) - (centsOffset / 100.0f) * noteHeight;
+}
+
 float PianoRollComponent::pitchToY (float midiPitch) const noexcept
 {
     float noteOffset = midiPitch - static_cast<float> (startNote);
@@ -124,12 +129,12 @@ void PianoRollComponent::paint (juce::Graphics& g)
 
                 float x1 = timeToX (note.startTime);
                 float x2 = timeToX (note.endTime);
-                float yTarget = noteToY (note.targetMidiNote);
+                float yTarget = noteWithCentsToY (note.targetMidiNote, note.targetCentsOffset);
                 float yOrig = noteToY (note.originalMidiNote);
                 float w = std::max (4.0f, x2 - x1);
 
-                // Draw original ghost block if note was transposed
-                if (note.targetMidiNote != note.originalMidiNote)
+                // Draw original ghost block if note was transposed or fine-tuned
+                if (note.targetMidiNote != note.originalMidiNote || std::abs (note.targetCentsOffset) >= 0.5f)
                 {
                     g.setColour (juce::Colour (0x33ffffff));
                     g.fillRoundedRectangle (x1, yOrig + 1.0f, w, noteHeight - 2.0f, 4.0f);
@@ -154,6 +159,9 @@ void PianoRollComponent::paint (juce::Graphics& g)
 
                     g.setColour (juce::Colour (0xffffcc00).withAlpha (0.9f));
                     
+                    const float semitoneShift = static_cast<float> (note.targetMidiNote - note.originalMidiNote)
+                                                + (note.targetCentsOffset / 100.0f);
+
                     bool firstPoint = true;
                     for (size_t idx = 0; idx < note.pitchCurve.size(); ++idx)
                     {
@@ -167,8 +175,8 @@ void PianoRollComponent::paint (juce::Graphics& g)
                         // Calculate instantaneous MIDI note pitch
                         float midiPitch = 69.0f + 12.0f * std::log2 (freq / 440.0f);
                         
-                        // Shift visual curve by the note transposition offset
-                        float transposedMidiPitch = midiPitch + static_cast<float> (note.targetMidiNote - note.originalMidiNote);
+                        // Shift visual curve by the note transposition + cent offset
+                        float transposedMidiPitch = midiPitch + semitoneShift;
                         float py = pitchToY (transposedMidiPitch);
 
                         if (firstPoint)
@@ -190,6 +198,10 @@ void PianoRollComponent::paint (juce::Graphics& g)
                 
                 float noteFreq = 440.0f * std::pow (2.0f, static_cast<float> (note.targetMidiNote - 69) / 12.0f);
                 juce::String labelText = PitchTunePluginAudioProcessor::getNoteNameFromFrequency (noteFreq);
+                const int roundedCents = static_cast<int> (std::round (note.targetCentsOffset));
+                if (roundedCents != 0)
+                    labelText += (roundedCents > 0 ? " +" : " ") + juce::String (roundedCents) + "c";
+
                 g.drawText (labelText, static_cast<int> (x1 + 5), static_cast<int> (yTarget), static_cast<int> (w - 10), static_cast<int> (noteHeight), juce::Justification::left, true);
             }
         }
@@ -310,7 +322,9 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
             if (pitchRegion == nullptr || ! pitchRegion->isAnalysisCompleted())
                 continue;
 
+            int matchedNoteIdx = -1;
             int matchedNoteMidi = -1;
+            float matchedNoteCents = 0.0f;
             {
                 const juce::SpinLock::ScopedLockType sl (pitchRegion->getNotesLock());
 
@@ -319,23 +333,35 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
                     const auto& note = pitchRegion->notes[noteIdx];
                     if (clickedTime >= note.startTime && clickedTime <= note.endTime)
                     {
-                        // Match note block boundaries
-                        float yTarget = noteToY (note.targetMidiNote);
+                        float yTarget = noteWithCentsToY (note.targetMidiNote, note.targetCentsOffset);
                         if (event.y >= yTarget && event.y <= yTarget + noteHeight)
                         {
-                            activeDragNoteIndex = static_cast<int> (noteIdx);
-                            activeDragRegion = pitchRegion;
-                            initialDragNoteMidi = note.targetMidiNote;
-                            dragStartPos = event.getPosition();
+                            matchedNoteIdx = static_cast<int> (noteIdx);
                             matchedNoteMidi = note.targetMidiNote;
+                            matchedNoteCents = note.targetCentsOffset;
                             break;
                         }
                     }
                 }
             }
 
-            if (activeDragNoteIndex >= 0)
+            if (matchedNoteIdx >= 0)
             {
+                if (event.mods.isPopupMenu())
+                {
+                    if (pitchRegion->splitNoteAtTime (static_cast<size_t> (matchedNoteIdx), clickedTime))
+                    {
+                        documentController->cacheRegionNotes (pitchRegion);
+                        repaint();
+                    }
+                    return;
+                }
+
+                activeDragNoteIndex = matchedNoteIdx;
+                activeDragRegion = pitchRegion;
+                initialDragNoteMidi = matchedNoteMidi;
+                initialDragNoteCents = matchedNoteCents;
+                dragStartPos = event.getPosition();
                 triggerAudition (matchedNoteMidi);
                 repaint();
                 return;
@@ -384,20 +410,38 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
 
     // Calculate vertical note displacement
     float deltaY = static_cast<float> (event.y - dragStartPos.y);
-    int semitoneDelta = -static_cast<int> (std::round (deltaY / noteHeight));
+    int newMidiNote = initialDragNoteMidi;
+    float newCents = initialDragNoteCents;
 
-    // Clamp the dragged target note to reasonable musical boundaries
-    int newMidiNote = std::clamp (initialDragNoteMidi + semitoneDelta, startNote, startNote + numNotes - 1);
+    if (event.mods.isAltDown())
+    {
+        const float startTotalSemitones = static_cast<float> (initialDragNoteMidi) + (initialDragNoteCents / 100.0f);
+        const float deltaSemitones = -(deltaY / noteHeight) * 0.5f;
+        const float clampedSemitones = std::clamp (startTotalSemitones + deltaSemitones,
+                                                   static_cast<float> (startNote),
+                                                   static_cast<float> (startNote + numNotes - 1));
+        newMidiNote = static_cast<int> (std::round (clampedSemitones));
+        newCents = std::round ((clampedSemitones - static_cast<float> (newMidiNote)) * 100.0f);
+    }
+    else
+    {
+        int semitoneDelta = -static_cast<int> (std::round (deltaY / noteHeight));
+        newMidiNote = std::clamp (initialDragNoteMidi + semitoneDelta, startNote, startNote + numNotes - 1);
+        newCents = initialDragNoteCents;
+    }
 
     bool changed = false;
+    bool midiChanged = false;
     {
         const juce::SpinLock::ScopedLockType sl (activeDragRegion->getNotesLock());
         if (static_cast<size_t> (activeDragNoteIndex) < activeDragRegion->notes.size())
         {
             auto& note = activeDragRegion->notes[static_cast<size_t> (activeDragNoteIndex)];
-            if (note.targetMidiNote != newMidiNote)
+            if (note.targetMidiNote != newMidiNote || std::abs (note.targetCentsOffset - newCents) >= 0.5f)
             {
+                midiChanged = (note.targetMidiNote != newMidiNote);
                 note.targetMidiNote = newMidiNote;
+                note.targetCentsOffset = newCents;
                 changed = true;
             }
         }
@@ -410,7 +454,8 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
 
     if (changed)
     {
-        triggerAudition (newMidiNote);
+        if (midiChanged)
+            triggerAudition (newMidiNote);
         repaint();
     }
 }
@@ -483,10 +528,11 @@ void PianoRollComponent::mouseDoubleClick (const juce::MouseEvent& event)
                 {
                     if (clickedTime >= note.startTime && clickedTime <= note.endTime)
                     {
-                        const float yTarget = noteToY (note.targetMidiNote);
+                        const float yTarget = noteWithCentsToY (note.targetMidiNote, note.targetCentsOffset);
                         if (event.y >= yTarget && event.y <= yTarget + noteHeight)
                         {
                             note.targetMidiNote = note.originalMidiNote;
+                            note.targetCentsOffset = 0.0f;
                             resetMidi = note.originalMidiNote;
                             break;
                         }

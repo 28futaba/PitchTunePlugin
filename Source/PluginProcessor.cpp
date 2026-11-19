@@ -19,7 +19,7 @@
 namespace
 {
     constexpr int32_t kArchiveMagic   = 0x50545031; // "PTP1"
-    constexpr int32_t kArchiveVersion = 1;
+    constexpr int32_t kArchiveVersion = 2;
 }
 
 //==============================================================================
@@ -69,6 +69,86 @@ std::vector<PitchTunePluginPlaybackRegion::Note> PitchTunePluginPlaybackRegion::
 {
     const juce::SpinLock::ScopedLockType sl (notesLock);
     return notes;
+}
+
+bool PitchTunePluginPlaybackRegion::splitNoteAtTime (size_t noteIndex, double splitTimeSeconds)
+{
+    const juce::SpinLock::ScopedLockType sl (notesLock);
+    if (noteIndex >= notes.size())
+        return false;
+
+    const Note origNote = notes[noteIndex];
+    if (splitTimeSeconds - origNote.startTime < 0.04 || origNote.endTime - splitTimeSeconds < 0.04)
+        return false;
+
+    Note leftNote;
+    leftNote.startTime = origNote.startTime;
+    leftNote.endTime = splitTimeSeconds;
+
+    Note rightNote;
+    rightNote.startTime = splitTimeSeconds;
+    rightNote.endTime = origNote.endTime;
+
+    if (! origNote.pitchCurve.empty())
+    {
+        const double totalDuration = origNote.endTime - origNote.startTime;
+        const double ratio = (totalDuration > 1e-6)
+                                 ? std::clamp ((splitTimeSeconds - origNote.startTime) / totalDuration, 0.0, 1.0)
+                                 : 0.5;
+        const size_t splitIdx = std::clamp<size_t> (
+            static_cast<size_t> (std::llround (ratio * static_cast<double> (origNote.pitchCurve.size()))),
+            size_t { 0 },
+            origNote.pitchCurve.size());
+
+        leftNote.pitchCurve.assign (origNote.pitchCurve.begin(), origNote.pitchCurve.begin() + static_cast<std::ptrdiff_t> (splitIdx));
+        rightNote.pitchCurve.assign (origNote.pitchCurve.begin() + static_cast<std::ptrdiff_t> (splitIdx), origNote.pitchCurve.end());
+    }
+
+    auto computeMeanMidi = [] (const std::vector<float>& curve, int fallbackMidi) -> int
+    {
+        float sum = 0.0f;
+        int count = 0;
+        for (float freq : curve)
+        {
+            if (freq > 0.0f)
+            {
+                sum += 69.0f + 12.0f * std::log2 (freq / 440.0f);
+                ++count;
+            }
+        }
+        return (count > 0) ? static_cast<int> (std::round (sum / static_cast<float> (count))) : fallbackMidi;
+    };
+
+    const bool wasUnedited = (origNote.targetMidiNote == origNote.originalMidiNote
+                              && std::abs (origNote.targetCentsOffset) < 0.5f);
+
+    if (wasUnedited)
+    {
+        const int leftMidi = computeMeanMidi (leftNote.pitchCurve, origNote.originalMidiNote);
+        const int rightMidi = computeMeanMidi (rightNote.pitchCurve, origNote.originalMidiNote);
+
+        leftNote.originalMidiNote = leftMidi;
+        leftNote.targetMidiNote = leftMidi;
+        leftNote.targetCentsOffset = 0.0f;
+
+        rightNote.originalMidiNote = rightMidi;
+        rightNote.targetMidiNote = rightMidi;
+        rightNote.targetCentsOffset = 0.0f;
+    }
+    else
+    {
+        leftNote.originalMidiNote = origNote.originalMidiNote;
+        leftNote.targetMidiNote = origNote.targetMidiNote;
+        leftNote.targetCentsOffset = origNote.targetCentsOffset;
+
+        rightNote.originalMidiNote = origNote.originalMidiNote;
+        rightNote.targetMidiNote = origNote.targetMidiNote;
+        rightNote.targetCentsOffset = origNote.targetCentsOffset;
+    }
+
+    notes[noteIndex] = std::move (leftNote);
+    notes.insert (notes.begin() + static_cast<std::ptrdiff_t> (noteIndex + 1), std::move (rightNote));
+    return true;
 }
 
 double PitchTunePluginPlaybackRegion::playbackToSourceTime (double playbackTime) const noexcept
@@ -157,6 +237,7 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
         newNote.endTime = std::max (startT, endT);
         newNote.originalMidiNote = midiNote;
         newNote.targetMidiNote = midiNote; // Default: no pitch change
+        newNote.targetCentsOffset = 0.0f;
         newNote.pitchCurve = curve;
 
         detectedNotes.push_back (std::move (newNote));
@@ -314,8 +395,9 @@ float PitchTunePluginPlaybackRegion::getPitchShiftSemitones (double timeInSecond
     {
         if (timeInSeconds >= note.startTime && timeInSeconds <= note.endTime)
         {
-            // Only shift when user manually transposes the note (target != original)
-            return static_cast<float> (note.targetMidiNote - note.originalMidiNote);
+            // Shift by manual transposition plus fine cent offset
+            return static_cast<float> (note.targetMidiNote - note.originalMidiNote)
+                   + (note.targetCentsOffset / 100.0f);
         }
     }
     return 0.0f;
@@ -590,7 +672,7 @@ bool PitchTunePluginDocumentController::doRestoreObjectsFromStream (juce::ARAInp
     const int32_t version = input.readInt();
     const int32_t entryCount = input.readInt();
 
-    if (input.failed() || magic != kArchiveMagic || version != kArchiveVersion || entryCount < 0)
+    if (input.failed() || magic != kArchiveMagic || (version != 1 && version != 2) || entryCount < 0)
         return false;
 
     struct RestoredEntry
@@ -622,6 +704,7 @@ bool PitchTunePluginDocumentController::doRestoreObjectsFromStream (juce::ARAInp
             note.endTime = input.readDouble();
             note.originalMidiNote = input.readInt();
             note.targetMidiNote = input.readInt();
+            note.targetCentsOffset = (version >= 2) ? input.readFloat() : 0.0f;
             const int32_t curveSize = input.readInt();
 
             if (input.failed() || curveSize < 0 || curveSize > 10000000)
@@ -852,6 +935,7 @@ bool PitchTunePluginDocumentController::doStoreObjectsToStream (juce::ARAOutputS
             ok = ok && output.writeDouble (note.endTime);
             ok = ok && output.writeInt (note.originalMidiNote);
             ok = ok && output.writeInt (note.targetMidiNote);
+            ok = ok && output.writeFloat (note.targetCentsOffset);
             ok = ok && output.writeInt (static_cast<int32_t> (note.pitchCurve.size()));
 
             for (float pitchHz : note.pitchCurve)
@@ -1001,7 +1085,7 @@ PitchTunePluginAudioProcessor::PitchTunePluginAudioProcessor()
                        .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                      #endif
+                     #endif
                        )
 #endif
 {

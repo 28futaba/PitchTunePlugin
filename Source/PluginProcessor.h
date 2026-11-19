@@ -56,6 +56,7 @@ public:
         double endTime = 0.0;   // In seconds (AudioSource / AudioModification time)
         int originalMidiNote = 0;
         int targetMidiNote = 0;
+        float targetCentsOffset = 0.0f; // Fine pitch offset in cents (-50 to +50)
         
         // Detailed pitch tracking (Hz) sampled at fixed intervals inside the note
         std::vector<float> pitchCurve;
@@ -75,6 +76,9 @@ public:
 
     /** Returns a thread-safe snapshot of the region's notes. */
     std::vector<Note> getNotesCopy() const;
+
+    /** Splits a note manually at splitTimeSeconds under lock. Returns true if split succeeded. */
+    bool splitNoteAtTime (size_t noteIndex, double splitTimeSeconds);
 
     /** Converts DAW playback timeline time (seconds) to AudioSource/Modification time (seconds). */
     double playbackToSourceTime (double playbackTime) const noexcept;

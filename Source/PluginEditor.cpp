@@ -12,6 +12,7 @@
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <algorithm>
 
 //==============================================================================
 PitchTunePluginAudioProcessorEditor::PitchTunePluginAudioProcessorEditor (PitchTunePluginAudioProcessor& p)
@@ -25,6 +26,14 @@ PitchTunePluginAudioProcessorEditor::PitchTunePluginAudioProcessorEditor (PitchT
     titleLabel.setFont (juce::FontOptions ("Inter", 16.0f, juce::Font::bold));
     titleLabel.setColour (juce::Label::textColourId, juce::Colours::cyan);
     addAndMakeVisible (titleLabel);
+
+    // Setup editing hint label
+    hintLabel.setText ("Drag: Semitone | Alt+Drag: Cents | Right-Click: Split | Double-Click: Reset", juce::dontSendNotification);
+    hintLabel.setFont (juce::FontOptions ("Inter", 11.5f, juce::Font::plain));
+    hintLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9a9ab0));
+    hintLabel.setJustificationType (juce::Justification::centredLeft);
+    hintLabel.setMinimumHorizontalScale (0.7f);
+    addAndMakeVisible (hintLabel);
 
     // Setup analyze/trigger button
     analyzeButton.setButtonText ("Analyze Track");
@@ -43,9 +52,14 @@ PitchTunePluginAudioProcessorEditor::PitchTunePluginAudioProcessorEditor (PitchT
     viewport.setScrollBarsShown (true, true);
     addAndMakeVisible (viewport);
 
-    // Set default plugin UI window size
-    setSize (700, 480);
-    
+    // Enable plugin window resizing and center initial scroll around vocal middle C (C4)
+    setResizable (true, true);
+    setResizeLimits (560, 340, 2560, 1440);
+    setSize (760, 500);
+
+    const int c4Y = (61 - 1 - (60 - 36)) * 18;
+    viewport.setViewPosition (0, std::max (0, c4Y - ((getHeight() - 40) / 2)));
+
     startTimerHz (30);
 }
 
@@ -71,8 +85,11 @@ void PitchTunePluginAudioProcessorEditor::resized()
     
     // Header layout
     auto headerArea = area.removeFromTop (40).reduced (10, 5);
-    titleLabel.setBounds (headerArea.removeFromLeft (250));
+    titleLabel.setBounds (headerArea.removeFromLeft (200));
     analyzeButton.setBounds (headerArea.removeFromRight (120));
+    headerArea.removeFromLeft (8);
+    headerArea.removeFromRight (8);
+    hintLabel.setBounds (headerArea);
 
     // Viewport layout (everything else)
     viewport.setBounds (area);
