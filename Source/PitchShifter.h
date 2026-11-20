@@ -36,6 +36,12 @@ public:
     /** Resets the internal state. */
     void reset();
 
+    /** Returns the constant center-tap delay latency in samples (~20ms). */
+    int getLatencySamples() const noexcept;
+
+    /** Resets the delay line and pre-fills it with lookahead samples for zero-latency ARA playback. */
+    void prime (const float* samples, int numSamples) noexcept;
+
 private:
     // Helper to read from the delay line with linear interpolation
     float readDelayLine (float delayInSamples);

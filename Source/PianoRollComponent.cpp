@@ -91,10 +91,21 @@ void PianoRollComponent::paint (juce::Graphics& g)
         g.drawHorizontalLine (static_cast<int> (y + noteHeight - 1), keyboardWidth, static_cast<float> (getWidth()));
     }
 
-    // Draw time grid (every 1 second)
-    g.setColour (juce::Colour (0xff2d2d3d));
+    // Draw time grid (adaptive interval + 0.5s sub-grid when zoomed in)
     double maxTime = xToTime (static_cast<float> (getWidth()));
-    for (int sec = 1; sec <= static_cast<int> (maxTime) + 1; ++sec)
+    if (pixelsPerSecond >= 220.0f)
+    {
+        g.setColour (juce::Colour (0xff232333));
+        for (double halfSec = 0.5; halfSec <= maxTime + 0.5; halfSec += 1.0)
+        {
+            float hx = timeToX (halfSec);
+            g.drawVerticalLine (static_cast<int> (hx), 0.0f, static_cast<float> (getHeight()));
+        }
+    }
+
+    const int secStep = (pixelsPerSecond < 50.0f) ? 2 : 1;
+    g.setColour (juce::Colour (0xff2d2d3d));
+    for (int sec = secStep; sec <= static_cast<int> (maxTime) + 1; sec += secStep)
     {
         float x = timeToX (static_cast<double> (sec));
         g.drawVerticalLine (static_cast<int> (x), 0.0f, static_cast<float> (getHeight()));
@@ -304,7 +315,9 @@ void PianoRollComponent::timerCallback()
         }
     }
 
-    const int requiredWidth = std::max (3000, static_cast<int> (std::ceil (timeToX (maxDurationSec))));
+    auto* vp = findParentComponentOfClass<juce::Viewport>();
+    const int minViewportWidth = (vp != nullptr) ? std::max (800, vp->getWidth()) : 1200;
+    const int requiredWidth = std::max (minViewportWidth, static_cast<int> (std::ceil (timeToX (maxDurationSec))));
     if (std::abs (requiredWidth - getWidth()) > 10 && getHeight() > 0)
         setSize (requiredWidth, getHeight());
 
@@ -372,7 +385,10 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
             {
                 if (event.mods.isPopupMenu())
                 {
-                    if (pitchRegion->splitNoteAtTime (static_cast<size_t> (matchedNoteIdx), clickedSourceTime))
+                    const bool changed = event.mods.isShiftDown()
+                                             ? pitchRegion->mergeNoteWithAdjacent (static_cast<size_t> (matchedNoteIdx), clickedSourceTime)
+                                             : pitchRegion->splitNoteAtTime (static_cast<size_t> (matchedNoteIdx), clickedSourceTime);
+                    if (changed)
                     {
                         documentController->cacheRegionNotes (pitchRegion);
                         repaint();
@@ -581,4 +597,47 @@ void PianoRollComponent::mouseDoubleClick (const juce::MouseEvent& event)
             }
         }
     }
+}
+
+void PianoRollComponent::mouseWheelMove (const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
+{
+    if (event.mods.isCtrlDown() || event.mods.isCommandDown())
+    {
+        const float deltaY = wheel.deltaY;
+        if (std::abs (deltaY) < 1e-4f)
+            return;
+
+        const double anchorTimeSec = std::max (0.0, xToTime (static_cast<float> (event.x)));
+        auto* vp = findParentComponentOfClass<juce::Viewport>();
+        const float mouseOffsetInViewport = static_cast<float> (event.x - (vp != nullptr ? vp->getViewPositionX() : 0));
+
+        const float zoomFactor = std::pow (1.18f, deltaY * 2.5f);
+        pixelsPerSecond = std::clamp (pixelsPerSecond * zoomFactor, 30.0f, 600.0f);
+
+        double maxDurationSec = 25.0;
+        if (auto* documentController = processor.getPitchDocumentController())
+        {
+            for (auto* pitchRegion : documentController->getActivePitchRegions())
+            {
+                if (pitchRegion != nullptr)
+                    maxDurationSec = std::max (maxDurationSec, pitchRegion->getMaxTimelineSeconds() + 2.0);
+            }
+        }
+
+        const int minViewportWidth = (vp != nullptr) ? std::max (800, vp->getWidth()) : 1200;
+        const int requiredWidth = std::max (minViewportWidth, static_cast<int> (std::ceil (timeToX (maxDurationSec))));
+        if (getHeight() > 0)
+            setSize (requiredWidth, getHeight());
+
+        if (vp != nullptr)
+        {
+            const int newViewX = std::max (0, static_cast<int> (std::round (timeToX (anchorTimeSec) - mouseOffsetInViewport)));
+            vp->setViewPosition (newViewX, vp->getViewPositionY());
+        }
+
+        repaint();
+        return;
+    }
+
+    juce::Component::mouseWheelMove (event, wheel);
 }

@@ -151,6 +151,57 @@ bool PitchTunePluginPlaybackRegion::splitNoteAtTime (size_t noteIndex, double sp
     return true;
 }
 
+bool PitchTunePluginPlaybackRegion::mergeNoteWithAdjacent (size_t noteIndex, double clickedSourceTime)
+{
+    const juce::SpinLock::ScopedLockType sl (notesLock);
+    if (noteIndex >= notes.size() || notes.size() < 2)
+        return false;
+
+    const bool hasPrev = (noteIndex > 0);
+    const bool hasNext = (noteIndex + 1 < notes.size());
+    if (! hasPrev && ! hasNext)
+        return false;
+
+    const double prevGap = hasPrev ? (notes[noteIndex].startTime - notes[noteIndex - 1].endTime) : 1e9;
+    const double nextGap = hasNext ? (notes[noteIndex + 1].startTime - notes[noteIndex].endTime) : 1e9;
+    const double distLeft = std::abs (clickedSourceTime - notes[noteIndex].startTime);
+    const double distRight = std::abs (notes[noteIndex].endTime - clickedSourceTime);
+
+    size_t neighborIndex = noteIndex;
+    if (hasPrev && hasNext)
+    {
+        if ((prevGap < 0.5 && nextGap < 0.5) || (prevGap >= 0.5 && nextGap >= 0.5))
+            neighborIndex = (distRight <= distLeft) ? (noteIndex + 1) : (noteIndex - 1);
+        else if (nextGap < 0.5)
+            neighborIndex = noteIndex + 1;
+        else
+            neighborIndex = noteIndex - 1;
+    }
+    else
+    {
+        neighborIndex = hasNext ? (noteIndex + 1) : (noteIndex - 1);
+    }
+
+    const size_t firstIdx = std::min (noteIndex, neighborIndex);
+    const size_t secondIdx = std::max (noteIndex, neighborIndex);
+    const Note clickedCopy = notes[noteIndex];
+
+    Note merged;
+    merged.startTime = notes[firstIdx].startTime;
+    merged.endTime = notes[secondIdx].endTime;
+    merged.originalMidiNote = clickedCopy.originalMidiNote;
+    merged.targetMidiNote = clickedCopy.targetMidiNote;
+    merged.targetCentsOffset = clickedCopy.targetCentsOffset;
+    merged.pitchCurve = std::move (notes[firstIdx].pitchCurve);
+    merged.pitchCurve.insert (merged.pitchCurve.end(),
+                                notes[secondIdx].pitchCurve.begin(),
+                                notes[secondIdx].pitchCurve.end());
+
+    notes[firstIdx] = std::move (merged);
+    notes.erase (notes.begin() + static_cast<std::ptrdiff_t> (secondIdx));
+    return true;
+}
+
 double PitchTunePluginPlaybackRegion::playbackToSourceTime (double playbackTime) const noexcept
 {
     const double playbackDuration = getDurationInPlaybackTime();
@@ -472,6 +523,9 @@ void PitchTunePluginPlaybackRenderer::prepareToPlay (double sampleRate, int maxi
     currentSampleRate = (sampleRate > 0.0) ? sampleRate : 44100.0;
     currentSamplesPerBlock = std::max (maximumSamplesPerBlock, 1);
     smoothedShiftSemitones = 0.0f;
+    lastNextBlockSample = -1;
+    wasPlaying = false;
+    lastActiveRegion = nullptr;
 
     shifters.clear();
     for (int i = 0; i < numChannels; ++i)
@@ -482,12 +536,17 @@ void PitchTunePluginPlaybackRenderer::prepareToPlay (double sampleRate, int maxi
     }
 
     tempProcessingBuffer.setSize (numChannels, std::max (currentSamplesPerBlock, 8192));
+    primeBuffer.setSize (numChannels, 8192);
 }
 
 void PitchTunePluginPlaybackRenderer::releaseResources()
 {
     shifters.clear();
     tempProcessingBuffer.setSize (0, 0);
+    primeBuffer.setSize (0, 0);
+    lastNextBlockSample = -1;
+    wasPlaying = false;
+    lastActiveRegion = nullptr;
 }
 
 bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& buffer,
@@ -518,6 +577,14 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
     else
         return true;
 
+    const int64_t currentBlockSample = static_cast<int64_t> (std::llround (blockStartTime * safePlaybackRate));
+    const bool isPlayingNow = positionInfo.getIsPlaying();
+    const bool transportDiscontinuity = (isPlayingNow != wasPlaying)
+                                        || (lastNextBlockSample < 0)
+                                        || (std::abs (currentBlockSample - lastNextBlockSample) > 4);
+    lastNextBlockSample = currentBlockSample + numSamples;
+    wasPlaying = isPlayingNow;
+
     const double sampleDuration = 1.0 / safePlaybackRate;
     const double blockEndTime = blockStartTime + (static_cast<double> (numSamples) * sampleDuration);
 
@@ -526,8 +593,40 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
 
     auto* customDoc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<PitchTunePluginDocumentController> (getDocumentController());
     const float correctionAmount = (customDoc != nullptr) ? customDoc->getPitchCorrectionAmount() : 0.85f;
+    const int latencySamples = (! shifters.empty() && shifters[0] != nullptr) ? shifters[0]->getLatencySamples() : 0;
 
     tempProcessingBuffer.setSize (numChannels, numSamples, false, false, true);
+    if (latencySamples > 0)
+        primeBuffer.setSize (numChannels, latencySamples, false, false, true);
+
+    auto readSourceWindow = [] (juce::ARAAudioSourceReader& reader,
+                                juce::AudioBuffer<float>& dest,
+                                int destStart,
+                                int count,
+                                int64_t srcOffset) noexcept
+    {
+        dest.clear (destStart, count);
+        if (count <= 0 || srcOffset >= reader.lengthInSamples)
+            return;
+
+        int localSkip = 0;
+        int64_t readerPos = srcOffset;
+        if (readerPos < 0)
+        {
+            localSkip = static_cast<int> (std::min<int64_t> (count, -readerPos));
+            readerPos = 0;
+        }
+
+        const int available = count - localSkip;
+        if (available <= 0 || readerPos >= reader.lengthInSamples)
+            return;
+
+        const int readCount = static_cast<int> (std::min<int64_t> (available, reader.lengthInSamples - readerPos));
+        if (readCount > 0)
+            reader.read (&dest, destStart + localSkip, readCount, readerPos, true, true);
+    };
+
+    bool anyRegionOverlapped = false;
 
     for (auto* region : regions)
     {
@@ -555,6 +654,8 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
         if (! reader.isValid() || reader.lengthInSamples <= 0)
             continue;
 
+        anyRegionOverlapped = true;
+
         auto* pitchRegion = dynamic_cast<PitchTunePluginPlaybackRegion*> (region);
         const double sourceSampleRate = (source->getSampleRate() > 0.0) ? source->getSampleRate() : safePlaybackRate;
         const double playbackOverlapStart = blockStartTime + (static_cast<double> (startSample) * sampleDuration);
@@ -563,31 +664,42 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
                                            : (region->getStartInAudioModificationTime() + (playbackOverlapStart - regionStart));
         const int64_t sourceSampleOffset = static_cast<int64_t> (std::llround (sourceStartTime * sourceSampleRate));
 
-        tempProcessingBuffer.clear (startSample, overlapSamples);
-
-        if (sourceSampleOffset < reader.lengthInSamples)
-        {
-            if (sourceSampleOffset < 0)
-            {
-                const int skip = static_cast<int> (std::min<int64_t> (overlapSamples, -sourceSampleOffset));
-                const int readCount = static_cast<int> (std::min<int64_t> (overlapSamples - skip, reader.lengthInSamples));
-                if (readCount > 0)
-                    reader.read (&tempProcessingBuffer, startSample + skip, readCount, 0, true, true);
-            }
-            else
-            {
-                const int readCount = static_cast<int> (std::min<int64_t> (overlapSamples, reader.lengthInSamples - sourceSampleOffset));
-                if (readCount > 0)
-                    reader.read (&tempProcessingBuffer, startSample, readCount, sourceSampleOffset, true, true);
-            }
-        }
-
         if (pitchRegion == nullptr || ! pitchRegion->isAnalysisCompleted())
         {
+            readSourceWindow (reader, tempProcessingBuffer, startSample, overlapSamples, sourceSampleOffset);
             for (int ch = 0; ch < numChannels; ++ch)
                 buffer.addFrom (ch, startSample, tempProcessingBuffer, ch, startSample, overlapSamples);
             continue;
         }
+
+        const int64_t sourceLatencyOffset = static_cast<int64_t> (std::llround (static_cast<double> (latencySamples) * (sourceSampleRate / safePlaybackRate)));
+
+        if (transportDiscontinuity || pitchRegion != lastActiveRegion || startSample > 0)
+        {
+            if (latencySamples > 0)
+            {
+                readSourceWindow (reader, primeBuffer, 0, latencySamples, sourceSampleOffset);
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    if (ch < static_cast<int> (shifters.size()) && shifters[ch] != nullptr)
+                        shifters[ch]->prime (primeBuffer.getReadPointer (ch), latencySamples);
+                }
+            }
+            else
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    if (ch < static_cast<int> (shifters.size()) && shifters[ch] != nullptr)
+                        shifters[ch]->reset();
+                }
+            }
+
+            smoothedShiftSemitones = pitchRegion->getPitchShiftSemitones (sourceStartTime, correctionAmount);
+            lastActiveRegion = pitchRegion;
+        }
+
+        const int64_t readAheadOffset = sourceSampleOffset + sourceLatencyOffset;
+        readSourceWindow (reader, tempProcessingBuffer, startSample, overlapSamples, readAheadOffset);
 
         // Apply pitch shifting per overlapping sample with ~3ms note-boundary smoothing
         for (int i = startSample; i < endSample; ++i)
@@ -599,7 +711,7 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
 
             for (int ch = 0; ch < numChannels; ++ch)
             {
-                if (ch < static_cast<int> (shifters.size()))
+                if (ch < static_cast<int> (shifters.size()) && shifters[ch] != nullptr)
                 {
                     shifters[ch]->setPitchShift (smoothedShiftSemitones);
 
@@ -612,6 +724,9 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
             }
         }
     }
+
+    if (! anyRegionOverlapped)
+        lastActiveRegion = nullptr;
 
     if (customDoc != nullptr)
         customDoc->setPlayheadTimeSeconds (blockStartTime);
@@ -1019,14 +1134,38 @@ void PitchTunePluginDocumentController::unregisterRegion (PitchTunePluginPlaybac
     }
 }
 
-void PitchTunePluginDocumentController::triggerAsyncAnalysis()
+void PitchTunePluginDocumentController::triggerAsyncAnalysis (bool forceReanalyze)
 {
+    if (forceReanalyze)
+    {
+        {
+            const juce::ScopedLock sl (regionLock);
+            for (auto* r : activeRegions)
+            {
+                if (r != nullptr)
+                    r->requestAbortAnalysis();
+            }
+        }
+        threadPool.removeAllJobs (true, 2000);
+
+        const juce::ScopedLock sl (regionLock);
+        archivedModificationNotes.clear();
+        archivedSourceNotes.clear();
+        modToSourceId.clear();
+
+        for (auto* r : activeRegions)
+        {
+            if (r != nullptr)
+                r->resetForReanalysis();
+        }
+    }
+
     auto regionsCopy = getActivePitchRegions();
     for (auto* pitchRegion : regionsCopy)
     {
         if (pitchRegion != nullptr && ! pitchRegion->isAnalysisCompleted())
         {
-            threadPool.addJob ([this, pitchRegion]
+            threadPool.addJob ([this, pitchRegion, forceReanalyze]
             {
                 {
                     const juce::ScopedLock sl (regionLock);
@@ -1040,6 +1179,20 @@ void PitchTunePluginDocumentController::triggerAsyncAnalysis()
                 {
                     const juce::ScopedLock sl (regionLock);
                     currentlyAnalyzingRegion = nullptr;
+                }
+
+                if (forceReanalyze && pitchRegion->isAnalysisCompleted())
+                {
+                    juce::MessageManager::callAsync ([this, pitchRegion]
+                    {
+                        bool stillActive = false;
+                        {
+                            const juce::ScopedLock sl (regionLock);
+                            stillActive = (std::find (activeRegions.begin(), activeRegions.end(), pitchRegion) != activeRegions.end());
+                        }
+                        if (stillActive)
+                            cacheRegionNotes (pitchRegion);
+                    });
                 }
             });
         }
@@ -1252,12 +1405,14 @@ void PitchTunePluginAudioProcessor::prepareToPlay (double sampleRate, int sample
 {
     currentSampleRate = sampleRate;
     
-    prepareToPlayForARA (sampleRate, samplesPerBlock, getTotalNumOutputChannels(), getProcessingPrecision());
+    const bool boundToARA = prepareToPlayForARA (sampleRate, samplesPerBlock, getTotalNumOutputChannels(), getProcessingPrecision());
 
     fallbackDetector.prepare (sampleRate, samplesPerBlock);
     fallbackShifters[0].prepare (sampleRate, samplesPerBlock);
     fallbackShifters[1].prepare (sampleRate, samplesPerBlock);
     smoothedShiftSemitones = 0.0f;
+
+    setLatencySamples (boundToARA ? 0 : fallbackShifters[0].getLatencySamples());
 }
 
 void PitchTunePluginAudioProcessor::releaseResources()

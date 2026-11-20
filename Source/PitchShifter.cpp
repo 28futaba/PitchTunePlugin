@@ -60,6 +60,29 @@ void PitchShifter::reset()
     phase2 = 0.5f;
 }
 
+int PitchShifter::getLatencySamples() const noexcept
+{
+    return static_cast<int> (std::round (32.0f + 0.5f * windowSizeSamples));
+}
+
+void PitchShifter::prime (const float* samples, int numSamples) noexcept
+{
+    std::fill (delayBuffer.begin(), delayBuffer.end(), 0.0f);
+    writeIndex = 0;
+    phase1 = 0.0f;
+    phase2 = 0.5f;
+
+    if (samples == nullptr || numSamples <= 0 || bufferSize <= 0)
+        return;
+
+    const int startIdx = std::max (0, numSamples - bufferSize);
+    for (int i = startIdx; i < numSamples; ++i)
+    {
+        delayBuffer[writeIndex] = samples[i];
+        writeIndex = (writeIndex + 1) % bufferSize;
+    }
+}
+
 float PitchShifter::readDelayLine (float delayInSamples)
 {
     float readPos = static_cast<float> (writeIndex) - delayInSamples;

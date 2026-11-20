@@ -68,6 +68,13 @@ public:
     /** Signals background analysis to stop early if the region is being destroyed. */
     void requestAbortAnalysis() noexcept { abortAnalysis.store (true); }
 
+    /** Clears completion and abort flags prior to a user-triggered re-analysis. */
+    void resetForReanalysis() noexcept
+    {
+        abortAnalysis.store (false);
+        analysisCompleted.store (false);
+    }
+
     /** Checks if the background analysis has completed. */
     bool isAnalysisCompleted() const noexcept { return analysisCompleted.load(); }
 
@@ -79,6 +86,9 @@ public:
 
     /** Splits a note manually at splitTimeSeconds under lock. Returns true if split succeeded. */
     bool splitNoteAtTime (size_t noteIndex, double splitTimeSeconds);
+
+    /** Merges a note with an adjacent neighbor based on clickedSourceTime. Returns true if merged. */
+    bool mergeNoteWithAdjacent (size_t noteIndex, double clickedSourceTime);
 
     /** Converts DAW playback timeline time (seconds) to AudioSource/Modification time (seconds). */
     double playbackToSourceTime (double playbackTime) const noexcept;
@@ -110,7 +120,7 @@ private:
 //==============================================================================
 /**
     ARA Playback Renderer processes audio clips during DAW playback.
-    It reads audio from the source, applies pitch shifting, and writes to output.
+    It reads audio from the source with lookahead priming, applies pitch shifting, and writes to output.
 */
 class PitchTunePluginPlaybackRenderer : public juce::ARAPlaybackRenderer
 {
@@ -133,10 +143,14 @@ private:
     double currentSampleRate { 44100.0 };
     int currentSamplesPerBlock { 512 };
     float smoothedShiftSemitones { 0.0f };
+    int64_t lastNextBlockSample { -1 };
+    bool wasPlaying { false };
+    PitchTunePluginPlaybackRegion* lastActiveRegion { nullptr };
     
     // Audio processing tools per channel
     std::vector<std::unique_ptr<PitchShifter>> shifters;
     juce::AudioBuffer<float> tempProcessingBuffer;
+    juce::AudioBuffer<float> primeBuffer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchTunePluginPlaybackRenderer)
 };
@@ -187,8 +201,8 @@ public:
     using juce::ARADocumentControllerSpecialisation::ARADocumentControllerSpecialisation;
     ~PitchTunePluginDocumentController() override;
 
-    /** Triggers asynchronous pitch analysis on all regions. */
-    void triggerAsyncAnalysis();
+    /** Triggers asynchronous pitch analysis on regions (pass true to discard edits and re-analyze). */
+    void triggerAsyncAnalysis (bool forceReanalyze = false);
 
     /** Returns a thread-safe snapshot of active playback regions. */
     std::vector<PitchTunePluginPlaybackRegion*> getActivePitchRegions() const;

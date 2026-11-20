@@ -29,11 +29,12 @@ PitchTunePluginAudioProcessorEditor::PitchTunePluginAudioProcessorEditor (PitchT
     addAndMakeVisible (titleLabel);
 
     // Setup editing hint label
-    hintLabel.setText ("Drag: Semitone | Alt+Drag: Cents | Right-Click: Split | Double-Click: Reset", juce::dontSendNotification);
+    hintLabel.setText ("Drag: Pitch | Alt+Drag: Cents | R-Click: Split | Shift+R-Click: Merge | Dbl-Click: Reset | Ctrl+Wheel: Zoom",
+                       juce::dontSendNotification);
     hintLabel.setFont (juce::FontOptions ("Inter", 11.0f, juce::Font::plain));
     hintLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9a9ab0));
     hintLabel.setJustificationType (juce::Justification::centredLeft);
-    hintLabel.setMinimumHorizontalScale (0.55f);
+    hintLabel.setMinimumHorizontalScale (0.5f);
     addAndMakeVisible (hintLabel);
 
     // Setup intra-note pitch centering slider
@@ -66,13 +67,14 @@ PitchTunePluginAudioProcessorEditor::PitchTunePluginAudioProcessorEditor (PitchT
     };
     addAndMakeVisible (correctionSlider);
 
-    // Setup analyze/trigger button
-    analyzeButton.setButtonText ("Analyze Track");
+    // Setup force re-analyze button (discards edits and resets track analysis)
+    analyzeButton.setButtonText ("Re-Analyze");
     analyzeButton.onClick = [this] 
     {
         if (auto* docController = audioProcessor.getPitchDocumentController())
         {
-            docController->triggerAsyncAnalysis();
+            docController->triggerAsyncAnalysis (true);
+            pianoRoll.repaint();
         }
     };
     addAndMakeVisible (analyzeButton);

@@ -137,7 +137,8 @@ private:
 /**
     A timeline component that draws a grid of MIDI notes (vertical) against time in seconds (horizontal).
     It renders detected audio blocks as rectangles with pitch curve overlays and handles drag-to-transpose,
-    Alt+drag fine cent tuning, right-click note splitting, and double-click pitch reset.
+    Alt+drag fine cent tuning, right-click note splitting, Shift+right-click merging,
+    double-click pitch reset, and Ctrl+mouse-wheel horizontal timeline zooming.
     Also handles clicking/dragging on the piano keys on the left margin to audition notes.
 */
 class PianoRollComponent : public juce::Component,
@@ -153,12 +154,13 @@ public:
     // Timer callback to poll DAW playback position and refresh region status
     void timerCallback() override;
 
-    // Mouse handlers to audition piano keys and drag/split/reset note blocks
+    // Mouse handlers to audition piano keys, drag/split/merge/reset note blocks, and zoom timeline
     void mouseDown (const juce::MouseEvent& event) override;
     void mouseDrag (const juce::MouseEvent& event) override;
     void mouseUp (const juce::MouseEvent& event) override;
     void mouseExit (const juce::MouseEvent& event) override;
     void mouseDoubleClick (const juce::MouseEvent& event) override;
+    void mouseWheelMove (const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override;
 
 private:
     // Helper coordinates mappings
@@ -181,7 +183,7 @@ private:
     const int numNotes { 61 };     // From C2 (36) to C7 (96)
     const int startNote { 36 };
     const float noteHeight { 18.0f };
-    const float pixelsPerSecond { 120.0f };
+    float pixelsPerSecond { 120.0f };
     const float keyboardWidth { 60.0f };
 
     // Active piano keyboard preview state
