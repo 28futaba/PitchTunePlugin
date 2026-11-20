@@ -5,7 +5,7 @@ JUCE 8 と Celemony ARA 2.0 SDK を用いて開発されたオフライン手動
 
 ---
 
-## 🌟 主な特徴 (v1.2.0)
+## 🌟 主な特徴 (v1.2.1)
 
 - **ARA 2.0 (Audio Random Access) 完全対応 & 実質ゼロ遅延**
   - DAW（Studio One, Reaper, Cubase, Logic Pro 等）のオーディオトラックやクリップと直接同期。
