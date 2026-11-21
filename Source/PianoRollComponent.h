@@ -13,6 +13,8 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <cstdint>
+#include <unordered_map>
 #include "PluginProcessor.h"
 
 #if JUCE_WINDOWS
@@ -178,6 +180,15 @@ private:
    #if JUCE_WINDOWS
     PianoTonePlayer tonePlayer;
    #endif
+
+    // Lock-free UI snapshot cache per ARA region (reloaded only when notesVersion changes)
+    struct CachedRegionNotes
+    {
+        bool initialized { false };
+        uint64_t version { 0 };
+        std::vector<PitchTunePluginPlaybackRegion::Note> notes;
+    };
+    std::unordered_map<PitchTunePluginPlaybackRegion*, CachedRegionNotes> regionNoteCache;
 
     // Bounds configuration
     const int numNotes { 61 };     // From C2 (36) to C7 (96)

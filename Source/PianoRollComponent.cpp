@@ -118,12 +118,25 @@ void PianoRollComponent::paint (juce::Graphics& g)
 
     bool anyAnalyzing = false;
 
-    // Fetch and Draw Playback Regions & Notes from Document Controller
+    const auto clipBounds = g.getClipBounds();
+    const float clipX1 = static_cast<float> (clipBounds.getX());
+    const float clipX2 = static_cast<float> (clipBounds.getRight());
+
+    // Fetch and Draw Playback Regions & Notes from Document Controller (lock-free via versioned UI cache)
     if (auto* documentController = processor.getPitchDocumentController())
     {
         const float correctionAmount = documentController->getPitchCorrectionAmount();
+        const auto activeRegions = documentController->getActivePitchRegions();
 
-        for (auto* pitchRegion : documentController->getActivePitchRegions())
+        for (auto cacheIt = regionNoteCache.begin(); cacheIt != regionNoteCache.end(); )
+        {
+            if (std::find (activeRegions.begin(), activeRegions.end(), cacheIt->first) == activeRegions.end())
+                cacheIt = regionNoteCache.erase (cacheIt);
+            else
+                ++cacheIt;
+        }
+
+        for (auto* pitchRegion : activeRegions)
         {
             if (pitchRegion == nullptr)
                 continue;
@@ -138,11 +151,20 @@ void PianoRollComponent::paint (juce::Graphics& g)
             const double modEnd = pitchRegion->getEndInAudioModificationTime();
             const bool hasValidModRange = (modEnd > modStart + 1e-4);
 
-            const juce::SpinLock::ScopedLockType sl (pitchRegion->getNotesLock());
-
-            for (size_t noteIdx = 0; noteIdx < pitchRegion->notes.size(); ++noteIdx)
+            auto& cacheEntry = regionNoteCache[pitchRegion];
+            const uint64_t currentVersion = pitchRegion->getNotesVersion();
+            if (! cacheEntry.initialized || cacheEntry.version != currentVersion)
             {
-                const auto& note = pitchRegion->notes[noteIdx];
+                cacheEntry.notes = pitchRegion->getNotesCopy();
+                cacheEntry.version = currentVersion;
+                cacheEntry.initialized = true;
+            }
+
+            const auto& regionNotes = cacheEntry.notes;
+
+            for (size_t noteIdx = 0; noteIdx < regionNotes.size(); ++noteIdx)
+            {
+                const auto& note = regionNotes[noteIdx];
 
                 if (hasValidModRange && (note.endTime <= modStart || note.startTime >= modEnd))
                     continue;
@@ -152,6 +174,9 @@ void PianoRollComponent::paint (juce::Graphics& g)
 
                 float x1 = timeToX (pitchRegion->sourceToPlaybackTime (visStartSrc));
                 float x2 = timeToX (pitchRegion->sourceToPlaybackTime (visEndSrc));
+                if (x2 < clipX1 || x1 > clipX2)
+                    continue;
+
                 float yTarget = noteWithCentsToY (note.targetMidiNote, note.targetCentsOffset);
                 float yOrig = noteToY (note.originalMidiNote);
                 float w = std::max (4.0f, x2 - x1);
@@ -173,12 +198,14 @@ void PianoRollComponent::paint (juce::Graphics& g)
                 g.setColour (noteColor);
                 g.drawRoundedRectangle (x1, yTarget + 1.0f, w, noteHeight - 2.0f, 4.0f, 1.5f);
 
-                // Draw pitch curve inside the note block
+                // Draw pitch curve inside the note block matching audio attack/release envelope
                 if (! note.pitchCurve.empty())
                 {
                     juce::Path pitchPath;
-                    double duration = note.endTime - note.startTime;
-                    double timeStep = (note.pitchCurve.size() > 1) ? (duration / static_cast<double> (note.pitchCurve.size() - 1)) : 0.0;
+                    const double duration = note.endTime - note.startTime;
+                    const double timeStep = (note.pitchCurve.size() > 1) ? (duration / static_cast<double> (note.pitchCurve.size() - 1)) : 0.0;
+                    const double attackFade = std::min (0.045, std::max (0.0, duration * 0.30));
+                    const double releaseFade = std::min (0.035, std::max (0.0, duration * 0.25));
 
                     g.setColour (juce::Colour (0xffffcc00).withAlpha (0.9f));
                     
@@ -196,14 +223,24 @@ void PianoRollComponent::paint (juce::Graphics& g)
                         if (hasValidModRange && (t < modStart || t > modEnd))
                             continue;
 
+                        float env = 1.0f;
+                        if (attackFade > 1e-6 && (t - note.startTime) < attackFade)
+                        {
+                            const double u = std::clamp ((t - note.startTime) / attackFade, 0.0, 1.0);
+                            env *= 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * static_cast<float> (u)));
+                        }
+                        if (releaseFade > 1e-6 && (note.endTime - t) < releaseFade)
+                        {
+                            const double u = std::clamp ((note.endTime - t) / releaseFade, 0.0, 1.0);
+                            env *= 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * static_cast<float> (u)));
+                        }
+
                         float px = timeToX (pitchRegion->sourceToPlaybackTime (t));
                         
-                        // Calculate instantaneous MIDI note pitch and apply intra-note correction + manual shift
+                        // Calculate instantaneous MIDI note pitch matching computeNoteShiftAtTime
                         float rawMidiPitch = 69.0f + 12.0f * std::log2 (freq / 440.0f);
                         float deviation = std::clamp (rawMidiPitch - static_cast<float> (note.originalMidiNote), -2.0f, 2.0f);
-                        float correctedMidiPitch = static_cast<float> (note.originalMidiNote)
-                                                   + deviation * (1.0f - correctionAmount)
-                                                   + semitoneShift;
+                        float correctedMidiPitch = rawMidiPitch + (semitoneShift - correctionAmount * deviation) * env;
                         float py = pitchToY (correctedMidiPitch);
 
                         if (firstPoint)
@@ -481,6 +518,7 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
                 midiChanged = (note.targetMidiNote != newMidiNote);
                 note.targetMidiNote = newMidiNote;
                 note.targetCentsOffset = newCents;
+                activeDragRegion->incrementNotesVersion();
                 changed = true;
             }
         }
@@ -579,6 +617,7 @@ void PianoRollComponent::mouseDoubleClick (const juce::MouseEvent& event)
                         {
                             note.targetMidiNote = note.originalMidiNote;
                             note.targetCentsOffset = 0.0f;
+                            pitchRegion->incrementNotesVersion();
                             resetMidi = note.originalMidiNote;
                             break;
                         }

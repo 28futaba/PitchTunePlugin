@@ -35,6 +35,103 @@ namespace
             }
         }
     }
+
+    float computeMedianValue (std::vector<float>& scratch)
+    {
+        if (scratch.empty())
+            return 0.0f;
+
+        const size_t mid = scratch.size() / 2;
+        std::nth_element (scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t> (mid), scratch.end());
+        float median = scratch[mid];
+        if ((scratch.size() % 2) == 0 && mid > 0)
+        {
+            const float leftMax = *std::max_element (scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t> (mid));
+            median = 0.5f * (leftMax + median);
+        }
+        return median;
+    }
+
+    float computeNoteShiftAtTime (const PitchTunePluginPlaybackRegion::Note& note,
+                                  double timeInSeconds,
+                                  float correctionAmount) noexcept
+    {
+        const float manualShift = static_cast<float> (note.targetMidiNote - note.originalMidiNote)
+                                  + (note.targetCentsOffset / 100.0f);
+        const float clampedCorrection = std::clamp (correctionAmount, 0.0f, 1.0f);
+
+        const double noteDuration = note.endTime - note.startTime;
+        const double attackFade = std::min (0.045, std::max (0.0, noteDuration * 0.30));
+        const double releaseFade = std::min (0.035, std::max (0.0, noteDuration * 0.25));
+
+        float env = 1.0f;
+        if (attackFade > 1e-6 && (timeInSeconds - note.startTime) < attackFade)
+        {
+            const double u = std::clamp ((timeInSeconds - note.startTime) / attackFade, 0.0, 1.0);
+            env *= 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * static_cast<float> (u)));
+        }
+        if (releaseFade > 1e-6 && (note.endTime - timeInSeconds) < releaseFade)
+        {
+            const double u = std::clamp ((note.endTime - timeInSeconds) / releaseFade, 0.0, 1.0);
+            env *= 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * static_cast<float> (u)));
+        }
+
+        if (clampedCorrection <= 0.0f || note.pitchCurve.empty())
+        {
+            const float out = manualShift * env;
+            return std::isfinite (out) ? out : 0.0f;
+        }
+
+        float currentMidiPitch = static_cast<float> (note.originalMidiNote);
+        bool hasValidMidi = false;
+
+        if (note.pitchCurve.size() == 1 || noteDuration <= 1e-6)
+        {
+            const float f = note.pitchCurve.front();
+            if (f > 0.0f && std::isfinite (f))
+            {
+                currentMidiPitch = 69.0f + 12.0f * std::log2 (f / 440.0f);
+                hasValidMidi = std::isfinite (currentMidiPitch);
+            }
+        }
+        else
+        {
+            const double normPos = std::clamp ((timeInSeconds - note.startTime) / noteDuration, 0.0, 1.0);
+            const double floatIdx = normPos * static_cast<double> (note.pitchCurve.size() - 1);
+            const size_t idx0 = static_cast<size_t> (std::floor (floatIdx));
+            const size_t idx1 = std::min (idx0 + 1, note.pitchCurve.size() - 1);
+            const float frac = static_cast<float> (floatIdx - static_cast<double> (idx0));
+            const float f0 = note.pitchCurve[idx0];
+            const float f1 = note.pitchCurve[idx1];
+
+            if (f0 > 0.0f && f1 > 0.0f && std::isfinite (f0) && std::isfinite (f1))
+            {
+                const float m0 = 69.0f + 12.0f * std::log2 (f0 / 440.0f);
+                const float m1 = 69.0f + 12.0f * std::log2 (f1 / 440.0f);
+                currentMidiPitch = m0 + frac * (m1 - m0);
+                hasValidMidi = std::isfinite (currentMidiPitch);
+            }
+            else
+            {
+                const float fValid = (f0 > 0.0f && std::isfinite (f0)) ? f0 : f1;
+                if (fValid > 0.0f && std::isfinite (fValid))
+                {
+                    currentMidiPitch = 69.0f + 12.0f * std::log2 (fValid / 440.0f);
+                    hasValidMidi = std::isfinite (currentMidiPitch);
+                }
+            }
+        }
+
+        if (hasValidMidi)
+        {
+            const float deviation = std::clamp (currentMidiPitch - static_cast<float> (note.originalMidiNote), -2.0f, 2.0f);
+            const float totalShift = (manualShift - (clampedCorrection * deviation)) * env;
+            return std::isfinite (totalShift) ? totalShift : 0.0f;
+        }
+
+        const float fallbackOut = manualShift * env;
+        return std::isfinite (fallbackOut) ? fallbackOut : 0.0f;
+    }
 }
 
 //==============================================================================
@@ -75,9 +172,14 @@ PitchTunePluginPlaybackRegion::~PitchTunePluginPlaybackRegion()
 
 void PitchTunePluginPlaybackRegion::restoreNotes (const std::vector<Note>& restoredNotes)
 {
+    std::vector<Note> sortedNotes = restoredNotes;
+    std::sort (sortedNotes.begin(), sortedNotes.end(),
+               [] (const Note& a, const Note& b) { return a.startTime < b.startTime; });
+
     const juce::SpinLock::ScopedLockType sl (notesLock);
-    notes = restoredNotes;
+    notes = std::move (sortedNotes);
     analysisCompleted.store (true);
+    incrementNotesVersion();
 }
 
 std::vector<PitchTunePluginPlaybackRegion::Note> PitchTunePluginPlaybackRegion::getNotesCopy() const
@@ -119,19 +221,20 @@ bool PitchTunePluginPlaybackRegion::splitNoteAtTime (size_t noteIndex, double sp
         rightNote.pitchCurve.assign (origNote.pitchCurve.begin() + static_cast<std::ptrdiff_t> (splitIdx), origNote.pitchCurve.end());
     }
 
-    auto computeMeanMidi = [] (const std::vector<float>& curve, int fallbackMidi) -> int
+    auto computeMedianMidi = [] (const std::vector<float>& curve, int fallbackMidi) -> int
     {
-        float sum = 0.0f;
-        int count = 0;
+        std::vector<float> midiVals;
+        midiVals.reserve (curve.size());
         for (float freq : curve)
         {
-            if (freq > 0.0f)
+            if (freq > 0.0f && std::isfinite (freq))
             {
-                sum += 69.0f + 12.0f * std::log2 (freq / 440.0f);
-                ++count;
+                const float m = 69.0f + 12.0f * std::log2 (freq / 440.0f);
+                if (std::isfinite (m))
+                    midiVals.push_back (m);
             }
         }
-        return (count > 0) ? static_cast<int> (std::round (sum / static_cast<float> (count))) : fallbackMidi;
+        return ! midiVals.empty() ? static_cast<int> (std::round (computeMedianValue (midiVals))) : fallbackMidi;
     };
 
     const bool wasUnedited = (origNote.targetMidiNote == origNote.originalMidiNote
@@ -139,8 +242,8 @@ bool PitchTunePluginPlaybackRegion::splitNoteAtTime (size_t noteIndex, double sp
 
     if (wasUnedited)
     {
-        const int leftMidi = computeMeanMidi (leftNote.pitchCurve, origNote.originalMidiNote);
-        const int rightMidi = computeMeanMidi (rightNote.pitchCurve, origNote.originalMidiNote);
+        const int leftMidi = computeMedianMidi (leftNote.pitchCurve, origNote.originalMidiNote);
+        const int rightMidi = computeMedianMidi (rightNote.pitchCurve, origNote.originalMidiNote);
 
         leftNote.originalMidiNote = leftMidi;
         leftNote.targetMidiNote = leftMidi;
@@ -163,6 +266,7 @@ bool PitchTunePluginPlaybackRegion::splitNoteAtTime (size_t noteIndex, double sp
 
     notes[noteIndex] = std::move (leftNote);
     notes.insert (notes.begin() + static_cast<std::ptrdiff_t> (noteIndex + 1), std::move (rightNote));
+    incrementNotesVersion();
     return true;
 }
 
@@ -214,6 +318,7 @@ bool PitchTunePluginPlaybackRegion::mergeNoteWithAdjacent (size_t noteIndex, dou
 
     notes[firstIdx] = std::move (merged);
     notes.erase (notes.begin() + static_cast<std::ptrdiff_t> (secondIdx));
+    incrementNotesVersion();
     return true;
 }
 
@@ -289,6 +394,8 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
 
     const int windowSize = 2048;
     const int hopSize = 256; // High time resolution: ~5.8ms at 44.1kHz
+    const double hopSec = static_cast<double> (hopSize) / sr;
+    const double totalSourceSec = static_cast<double> (sourceLengthSamples) / sr;
     constexpr size_t kMinNoteFrames = 8;           // ~46ms minimum note length
     constexpr int kTransitionFramesRequired = 5;   // ~29ms hysteresis to split legato pitch jumps
     constexpr float kLegatoSplitThreshold = 0.75f; // Semitones deviation required to trigger split
@@ -297,7 +404,91 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
     PitchDetector analysisDetector;
     analysisDetector.prepare (sr, windowSize);
 
+    // Pass 1: Extract raw pitch frames across the audio source
+    const size_t approxFrames = (sourceLengthSamples >= windowSize)
+                                    ? static_cast<size_t> ((sourceLengthSamples - windowSize) / hopSize + 1)
+                                    : size_t { 0 };
+    std::vector<float> rawMidi;
+    std::vector<double> frameTimes;
+    rawMidi.reserve (approxFrames);
+    frameTimes.reserve (approxFrames);
+
+    for (int64_t currentSample = 0; currentSample + windowSize <= sourceLengthSamples; currentSample += hopSize)
+    {
+        if (abortAnalysis.load() || analysisCompleted.load())
+            return;
+
+        if (! reader.read (&windowBuffer, 0, windowSize, currentSample, true, false))
+            break;
+
+        const float freq = analysisDetector.detectPitchDirect (windowBuffer.getReadPointer (0), windowSize);
+        const double currentTime = static_cast<double> (currentSample + (windowSize / 2)) / sr;
+
+        float midiPitch = 0.0f;
+        if (freq > 0.0f && std::isfinite (freq))
+        {
+            const float m = 69.0f + 12.0f * std::log2 (freq / 440.0f);
+            if (std::isfinite (m))
+                midiPitch = m;
+        }
+
+        rawMidi.push_back (midiPitch);
+        frameTimes.push_back (currentTime);
+    }
+
+    if (abortAnalysis.load() || analysisCompleted.load())
+        return;
+
+    // Pass 2: Suppress isolated unvoiced blips, apply 5-frame median filter for octave spikes,
+    // and lightly smooth consecutive within-note jitter while keeping legato transitions sharp.
+    const size_t numFrames = rawMidi.size();
+    std::vector<float> medianMidi (numFrames, 0.0f);
+    std::vector<float> medianScratch;
+    medianScratch.reserve (5);
+
+    for (size_t i = 0; i < numFrames; ++i)
+    {
+        medianScratch.clear();
+        const size_t winStart = (i >= 2) ? (i - 2) : 0;
+        const size_t winEnd = std::min (numFrames - 1, i + 2);
+
+        for (size_t j = winStart; j <= winEnd; ++j)
+        {
+            if (rawMidi[j] > 0.0f)
+                medianScratch.push_back (rawMidi[j]);
+        }
+
+        if (medianScratch.size() >= 3 && rawMidi[i] > 0.0f)
+            medianMidi[i] = computeMedianValue (medianScratch);
+    }
+
+    std::vector<float> smoothedMidi (numFrames, 0.0f);
+    for (size_t i = 0; i < numFrames; ++i)
+    {
+        const float center = medianMidi[i];
+        if (center <= 0.0f)
+            continue;
+
+        float weightedSum = 0.50f * center;
+        float weightSum = 0.50f;
+
+        if (i > 0 && medianMidi[i - 1] > 0.0f && std::abs (medianMidi[i - 1] - center) < 1.5f)
+        {
+            weightedSum += 0.25f * medianMidi[i - 1];
+            weightSum += 0.25f;
+        }
+        if (i + 1 < numFrames && medianMidi[i + 1] > 0.0f && std::abs (medianMidi[i + 1] - center) < 1.5f)
+        {
+            weightedSum += 0.25f * medianMidi[i + 1];
+            weightSum += 0.25f;
+        }
+
+        smoothedMidi[i] = weightedSum / weightSum;
+    }
+
+    // Pass 3: Segment cleaned trajectory into discrete notes using hysteresis
     std::vector<Note> detectedNotes;
+    std::vector<float> interiorScratch;
 
     auto pushNoteIfValid = [&] (double startT, double endT,
                                 const std::vector<float>& curve,
@@ -306,15 +497,24 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
         if (curve.size() < kMinNoteFrames || logPitches.empty())
             return;
 
-        float sumMidi = 0.0f;
-        for (float m : logPitches)
-            sumMidi += m;
-        const float avgMidi = sumMidi / static_cast<float> (logPitches.size());
-        const int midiNote = static_cast<int> (std::round (avgMidi));
+        interiorScratch.clear();
+        if (logPitches.size() >= 10)
+        {
+            const size_t trim = logPitches.size() / 5;
+            interiorScratch.assign (logPitches.begin() + static_cast<std::ptrdiff_t> (trim),
+                                    logPitches.end() - static_cast<std::ptrdiff_t> (trim));
+        }
+        else
+        {
+            interiorScratch = logPitches;
+        }
+
+        const float medianNoteMidi = computeMedianValue (interiorScratch);
+        const int midiNote = static_cast<int> (std::round (medianNoteMidi));
 
         Note newNote;
         newNote.startTime = startT;
-        newNote.endTime = std::max (startT, endT);
+        newNote.endTime = std::max (startT, std::min (totalSourceSec, endT));
         newNote.originalMidiNote = midiNote;
         newNote.targetMidiNote = midiNote; // Default: no pitch change
         newNote.targetCentsOffset = 0.0f;
@@ -322,8 +522,6 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
 
         detectedNotes.push_back (std::move (newNote));
     };
-
-    int64_t currentSample = 0;
 
     bool inNote = false;
     double noteStartTime = 0.0;
@@ -334,22 +532,17 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
     int transitionCount = 0;
     int candidateMidi = -1;
 
-    while (currentSample + windowSize <= sourceLengthSamples)
+    for (size_t i = 0; i < numFrames; ++i)
     {
         if (abortAnalysis.load() || analysisCompleted.load())
             return;
 
-        if (! reader.read (&windowBuffer, 0, windowSize, currentSample, true, false))
-            break;
+        const float midiPitch = smoothedMidi[i];
+        const double currentTime = frameTimes[i];
 
-        const float freq = analysisDetector.detectPitchDirect (windowBuffer.getReadPointer (0), windowSize);
-
-        // Timeline position corresponding to the center of the analysis window
-        const double currentTime = static_cast<double> (currentSample + (windowSize / 2)) / sr;
-
-        if (freq > 0.0f)
+        if (midiPitch > 0.0f)
         {
-            const float midiPitch = 69.0f + 12.0f * std::log2 (freq / 440.0f);
+            const float freq = 440.0f * std::pow (2.0f, (midiPitch - 69.0f) / 12.0f);
             const int frameMidi = static_cast<int> (std::round (midiPitch));
 
             if (! inNote)
@@ -373,8 +566,8 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
                 if (stableLen >= kMinNoteFrames)
                 {
                     float stableSum = 0.0f;
-                    for (size_t i = 0; i < stableLen; ++i)
-                        stableSum += activeLogPitches[i];
+                    for (size_t k = 0; k < stableLen; ++k)
+                        stableSum += activeLogPitches[k];
                     const float stableMean = stableSum / static_cast<float> (stableLen);
                     const int currentNoteMidi = static_cast<int> (std::round (stableMean));
 
@@ -431,7 +624,8 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
             if (inNote)
             {
                 inNote = false;
-                pushNoteIfValid (noteStartTime, currentTime, currentPitchCurve, activeLogPitches);
+                const double noteEndTime = activeFrameTimes.back() + hopSec;
+                pushNoteIfValid (noteStartTime, noteEndTime, currentPitchCurve, activeLogPitches);
                 currentPitchCurve.clear();
                 activeLogPitches.clear();
                 activeFrameTimes.clear();
@@ -439,14 +633,12 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
                 candidateMidi = -1;
             }
         }
-
-        currentSample += hopSize;
     }
 
     // Process trailing note if active at audio end
-    if (inNote)
+    if (inNote && ! activeFrameTimes.empty())
     {
-        const double noteEndTime = static_cast<double> (sourceLengthSamples) / sr;
+        const double noteEndTime = activeFrameTimes.back() + hopSec;
         pushNoteIfValid (noteStartTime, noteEndTime, currentPitchCurve, activeLogPitches);
     }
 
@@ -458,7 +650,78 @@ void PitchTunePluginPlaybackRegion::analyzeAudio()
     {
         notes = std::move (detectedNotes);
         analysisCompleted.store (true);
+        incrementNotesVersion();
     }
+}
+
+bool PitchTunePluginPlaybackRegion::computePitchShiftsForBlock (double startSourceTime,
+                                                                 double sourceTimeStepPerSample,
+                                                                 int numSamples,
+                                                                 float correctionAmount,
+                                                                 float* outShifts,
+                                                                 float& lastValidShift) const noexcept
+{
+    if (outShifts == nullptr || numSamples <= 0)
+        return false;
+
+    if (! analysisCompleted.load())
+    {
+        std::fill_n (outShifts, numSamples, 0.0f);
+        lastValidShift = 0.0f;
+        return true;
+    }
+
+    const juce::SpinLock::ScopedTryLockType stl (notesLock);
+    if (! stl.isLocked())
+    {
+        std::fill_n (outShifts, numSamples, std::isfinite (lastValidShift) ? lastValidShift : 0.0f);
+        return false;
+    }
+
+    if (notes.empty())
+    {
+        std::fill_n (outShifts, numSamples, 0.0f);
+        lastValidShift = 0.0f;
+        return true;
+    }
+
+    size_t noteIdx = 0;
+    if (sourceTimeStepPerSample >= 0.0)
+    {
+        auto it = std::lower_bound (notes.begin(), notes.end(), startSourceTime,
+                                    [] (const Note& n, double t) { return n.endTime < t; });
+        noteIdx = static_cast<size_t> (std::distance (notes.begin(), it));
+    }
+
+    for (int s = 0; s < numSamples; ++s)
+    {
+        const double t = startSourceTime + static_cast<double> (s) * sourceTimeStepPerSample;
+
+        if (sourceTimeStepPerSample >= 0.0)
+        {
+            while (noteIdx < notes.size() && notes[noteIdx].endTime < t)
+                ++noteIdx;
+        }
+        else
+        {
+            auto it = std::lower_bound (notes.begin(), notes.end(), t,
+                                        [] (const Note& n, double timeVal) { return n.endTime < timeVal; });
+            noteIdx = static_cast<size_t> (std::distance (notes.begin(), it));
+        }
+
+        float shift = 0.0f;
+        if (noteIdx < notes.size())
+        {
+            const auto& note = notes[noteIdx];
+            if (t >= note.startTime && t <= note.endTime)
+                shift = computeNoteShiftAtTime (note, t, correctionAmount);
+        }
+
+        outShifts[s] = shift;
+        lastValidShift = shift;
+    }
+
+    return true;
 }
 
 float PitchTunePluginPlaybackRegion::getPitchShiftSemitones (double timeInSeconds, float correctionAmount) const
@@ -470,53 +733,11 @@ float PitchTunePluginPlaybackRegion::getPitchShiftSemitones (double timeInSecond
     if (! stl.isLocked())
         return 0.0f;
 
-    // Search for a note encompassing the current source time position
-    for (const auto& note : notes)
-    {
-        if (timeInSeconds >= note.startTime && timeInSeconds <= note.endTime)
-        {
-            const float manualShift = static_cast<float> (note.targetMidiNote - note.originalMidiNote)
-                                      + (note.targetCentsOffset / 100.0f);
-            const float clampedCorrection = std::clamp (correctionAmount, 0.0f, 1.0f);
+    auto it = std::lower_bound (notes.begin(), notes.end(), timeInSeconds,
+                                [] (const Note& n, double t) { return n.endTime < t; });
+    if (it != notes.end() && timeInSeconds >= it->startTime && timeInSeconds <= it->endTime)
+        return computeNoteShiftAtTime (*it, timeInSeconds, correctionAmount);
 
-            if (clampedCorrection <= 0.0f || note.pitchCurve.empty())
-                return std::isfinite (manualShift) ? manualShift : 0.0f;
-
-            float interpFreq = 0.0f;
-            if (note.pitchCurve.size() == 1 || note.endTime <= note.startTime + 1e-6)
-            {
-                interpFreq = note.pitchCurve.front();
-            }
-            else
-            {
-                const double normPos = std::clamp ((timeInSeconds - note.startTime) / (note.endTime - note.startTime), 0.0, 1.0);
-                const double floatIdx = normPos * static_cast<double> (note.pitchCurve.size() - 1);
-                const size_t idx0 = static_cast<size_t> (std::floor (floatIdx));
-                const size_t idx1 = std::min (idx0 + 1, note.pitchCurve.size() - 1);
-                const float frac = static_cast<float> (floatIdx - static_cast<double> (idx0));
-                const float f0 = note.pitchCurve[idx0];
-                const float f1 = note.pitchCurve[idx1];
-
-                if (f0 > 0.0f && f1 > 0.0f)
-                    interpFreq = f0 + frac * (f1 - f0);
-                else
-                    interpFreq = (f0 > 0.0f) ? f0 : f1;
-            }
-
-            if (interpFreq > 0.0f && std::isfinite (interpFreq))
-            {
-                const float currentMidiPitch = 69.0f + 12.0f * std::log2 (interpFreq / 440.0f);
-                if (std::isfinite (currentMidiPitch))
-                {
-                    const float deviation = std::clamp (currentMidiPitch - static_cast<float> (note.originalMidiNote), -2.0f, 2.0f);
-                    const float totalShift = manualShift - (clampedCorrection * deviation);
-                    return std::isfinite (totalShift) ? totalShift : 0.0f;
-                }
-            }
-
-            return std::isfinite (manualShift) ? manualShift : 0.0f;
-        }
-    }
     return 0.0f;
 }
 
@@ -572,7 +793,7 @@ void PitchTunePluginPlaybackRenderer::rebuildReaders()
         return;
 
     std::map<juce::ARAAudioSource*, PossiblyBufferedReader> newReaders;
-    const int readAheadSize = juce::jmax (4 * currentSamplesPerBlock, juce::roundToInt (2.0 * currentSampleRate));
+    const int readAheadSize = juce::jmax (8 * currentSamplesPerBlock, juce::roundToInt (3.0 * currentSampleRate));
 
     for (auto* region : getPlaybackRegions())
     {
@@ -626,8 +847,12 @@ void PitchTunePluginPlaybackRenderer::prepareToPlay (double sampleRate, int maxi
     isPreparedFlag = true;
 
     smoothedShiftSemitones = 0.0f;
+    lastValidTargetShift = 0.0f;
     lastNextBlockSample = -1;
     wasPlaying = false;
+    needsReprime = true;
+    fadeInSamplesRemaining = 0;
+    fadeInTotalSamples = std::max (32, static_cast<int> (std::round (currentSampleRate * 0.004)));
     lastActiveRegion = nullptr;
 
     shifters.clear();
@@ -638,8 +863,11 @@ void PitchTunePluginPlaybackRenderer::prepareToPlay (double sampleRate, int maxi
         shifters.push_back (std::move (shifter));
     }
 
+    const int latencySamples = (! shifters.empty() && shifters[0] != nullptr) ? shifters[0]->getLatencySamples() : 0;
     tempProcessingBuffer.setSize (preparedNumChannels, std::max (currentSamplesPerBlock, 8192));
-    primeBuffer.setSize (preparedNumChannels, 8192);
+    resampleScratchBuffer.setSize (preparedNumChannels, std::max (currentSamplesPerBlock * 4 + 64, 16384));
+    primeBuffer.setSize (preparedNumChannels, std::max (latencySamples + 64, 8192));
+    shiftScratchBuffer.assign (static_cast<size_t> (std::max (currentSamplesPerBlock, 8192)), 0.0f);
 
     rebuildReaders();
 }
@@ -657,9 +885,14 @@ void PitchTunePluginPlaybackRenderer::releaseResources()
 
     shifters.clear();
     tempProcessingBuffer.setSize (0, 0);
+    resampleScratchBuffer.setSize (0, 0);
     primeBuffer.setSize (0, 0);
+    shiftScratchBuffer.clear();
     lastNextBlockSample = -1;
     wasPlaying = false;
+    needsReprime = true;
+    fadeInSamplesRemaining = 0;
+    lastValidTargetShift = 0.0f;
     lastActiveRegion = nullptr;
 }
 
@@ -695,6 +928,8 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
         lastNextBlockSample = -1;
         wasPlaying = false;
         lastActiveRegion = nullptr;
+        needsReprime = true;
+        fadeInSamplesRemaining = 0;
         return true;
     }
 
@@ -714,19 +949,21 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
     if (! readerSl.isLocked())
         return true;
 
-    const int64_t currentBlockSample = static_cast<int64_t> (std::llround (blockStartTime * safePlaybackRate));
+    const int64_t currentBlockSample = positionInfo.getTimeInSamples()
+                                           ? *positionInfo.getTimeInSamples()
+                                           : static_cast<int64_t> (std::llround (blockStartTime * safePlaybackRate));
     const bool isPlayingNow = positionInfo.getIsPlaying();
     const bool transportDiscontinuity = (isPlayingNow != wasPlaying)
                                         || (lastNextBlockSample < 0)
-                                        || (std::abs (currentBlockSample - lastNextBlockSample) > 4);
+                                        || (std::abs (currentBlockSample - lastNextBlockSample) > 8);
     lastNextBlockSample = currentBlockSample + numSamples;
     wasPlaying = isPlayingNow;
 
     const double sampleDuration = 1.0 / safePlaybackRate;
     const double blockEndTime = blockStartTime + (static_cast<double> (numSamples) * sampleDuration);
 
-    // ~3ms smoothing factor to avoid audible clicks across note boundaries
-    const float smoothCoeff = std::exp (-1.0f / static_cast<float> (std::max (1.0, 0.003 * safePlaybackRate)));
+    // ~18ms smoothing factor for natural vocal pitch transitions
+    const float smoothCoeff = std::exp (-1.0f / static_cast<float> (std::max (1.0, 0.018 * safePlaybackRate)));
 
     const float correctionAmount = customDoc->getPitchCorrectionAmount();
     const int latencySamples = (! shifters.empty() && shifters[0] != nullptr) ? shifters[0]->getLatencySamples() : 0;
@@ -736,43 +973,144 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
     if (latencySamples > 0)
         primeBuffer.setSize (scratchChannels, latencySamples, false, false, true);
 
-    auto readSourceWindow = [this, realtime] (const PossiblyBufferedReader& bufferedReader,
-                                              juce::AudioBuffer<float>& dest,
-                                              int destStart,
-                                              int count,
-                                              int64_t srcOffset) noexcept
+    auto readSourceWindow = [this, realtime, scratchChannels] (const PossiblyBufferedReader& bufferedReader,
+                                                               juce::AudioBuffer<float>& dest,
+                                                               int destStart,
+                                                               int count,
+                                                               double exactStartSourceSample,
+                                                               double srcRate,
+                                                               double pbRate) noexcept -> bool
     {
         dest.clear (destStart, count);
         auto* reader = bufferedReader.get();
-        if (reader == nullptr || count <= 0 || srcOffset >= reader->lengthInSamples)
-            return;
-
-        int localSkip = 0;
-        int64_t readerPos = srcOffset;
-        if (readerPos < 0)
-        {
-            localSkip = static_cast<int> (std::min<int64_t> (count, -readerPos));
-            readerPos = 0;
-        }
-
-        const int available = count - localSkip;
-        if (available <= 0 || readerPos >= reader->lengthInSamples)
-            return;
-
-        const int readCount = static_cast<int> (std::min<int64_t> (available, reader->lengthInSamples - readerPos));
-        if (readCount <= 0)
-            return;
+        if (reader == nullptr || count <= 0 || reader->lengthInSamples <= 0)
+            return false;
 
         bufferedReader.setReadTimeout (realtime == juce::AudioProcessor::Realtime::no ? 100 : 0);
-        const bool ok = reader->read (&dest, destStart + localSkip, readCount, readerPos, true, true);
-        if (! ok && useBufferedReaders)
-            sharedTimesliceThread->notify();
 
-        if (ok && reader->numChannels == 1 && dest.getNumChannels() > 1)
+        // Fast path when source sample rate matches effective playback rate
+        if (std::abs (srcRate - pbRate) < 1.0)
+        {
+            const int64_t srcOffset = static_cast<int64_t> (std::llround (exactStartSourceSample));
+            if (srcOffset >= reader->lengthInSamples || srcOffset + count <= 0)
+                return true;
+
+            int localSkip = 0;
+            int64_t readerPos = srcOffset;
+            if (readerPos < 0)
+            {
+                localSkip = static_cast<int> (std::min<int64_t> (count, -readerPos));
+                readerPos = 0;
+            }
+
+            const int available = count - localSkip;
+            if (available <= 0 || readerPos >= reader->lengthInSamples)
+                return true;
+
+            const int readCount = static_cast<int> (std::min<int64_t> (available, reader->lengthInSamples - readerPos));
+            if (readCount <= 0)
+                return true;
+
+            const bool ok = reader->read (&dest, destStart + localSkip, readCount, readerPos, true, true);
+            if (! ok)
+            {
+                if (useBufferedReaders)
+                    sharedTimesliceThread->notify();
+                return false;
+            }
+
+            if (reader->numChannels == 1 && dest.getNumChannels() > 1)
+            {
+                for (int ch = 1; ch < dest.getNumChannels(); ++ch)
+                    dest.copyFrom (ch, destStart + localSkip, dest, 0, destStart + localSkip, readCount);
+            }
+
+            return true;
+        }
+
+        // Resampling path via Catmull-Rom cubic interpolation when source and playback sample rates differ
+        const double ratio = (pbRate > 0.0 && srcRate > 0.0) ? (srcRate / pbRate) : 1.0;
+        const double endSourceSample = exactStartSourceSample + static_cast<double> (count - 1) * ratio;
+
+        if (exactStartSourceSample >= static_cast<double> (reader->lengthInSamples) || endSourceSample < -2.0)
+            return true;
+
+        const int64_t minSample = std::min (static_cast<int64_t> (std::floor (exactStartSourceSample)),
+                                            static_cast<int64_t> (std::floor (endSourceSample))) - 1;
+        const int64_t maxSample = std::max (static_cast<int64_t> (std::ceil (exactStartSourceSample)),
+                                            static_cast<int64_t> (std::ceil (endSourceSample))) + 2;
+
+        const int64_t readStart = std::max<int64_t> (0, minSample);
+        const int64_t readEnd = std::min<int64_t> (reader->lengthInSamples, maxSample + 1);
+        const int readCount = static_cast<int> (std::max<int64_t> (0, readEnd - readStart));
+
+        if (readCount <= 0)
+            return true;
+
+        if (readCount > resampleScratchBuffer.getNumSamples())
+        {
+            if (realtime == juce::AudioProcessor::Realtime::no)
+                resampleScratchBuffer.setSize (scratchChannels, readCount, false, false, true);
+            else
+                return false;
+        }
+
+        const bool ok = reader->read (&resampleScratchBuffer, 0, readCount, readStart, true, true);
+        if (! ok)
+        {
+            if (useBufferedReaders)
+                sharedTimesliceThread->notify();
+            return false;
+        }
+
+        const int copyCh = std::min (static_cast<int> (reader->numChannels), dest.getNumChannels());
+        for (int ch = 0; ch < copyCh; ++ch)
+        {
+            const float* srcPtr = resampleScratchBuffer.getReadPointer (ch);
+            float* dstPtr = dest.getWritePointer (ch);
+
+            for (int j = 0; j < count; ++j)
+            {
+                const double sPos = exactStartSourceSample + static_cast<double> (j) * ratio;
+                if (sPos < 0.0 || sPos >= static_cast<double> (reader->lengthInSamples))
+                {
+                    dstPtr[destStart + j] = 0.0f;
+                    continue;
+                }
+
+                const int64_t i1 = static_cast<int64_t> (std::floor (sPos));
+                const float frac = static_cast<float> (sPos - static_cast<double> (i1));
+
+                auto sampleAt = [srcPtr, readStart, readCount] (int64_t absIdx) noexcept -> float
+                {
+                    const int64_t rel = absIdx - readStart;
+                    if (rel < 0 || rel >= readCount)
+                        return 0.0f;
+                    return srcPtr[rel];
+                };
+
+                const float y0 = sampleAt (i1 - 1);
+                const float y1 = sampleAt (i1);
+                const float y2 = sampleAt (i1 + 1);
+                const float y3 = sampleAt (i1 + 2);
+
+                const float a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
+                const float a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+                const float a2 = -0.5f * y0 + 0.5f * y2;
+                const float a3 = y1;
+
+                const float val = ((a0 * frac + a1) * frac + a2) * frac + a3;
+                dstPtr[destStart + j] = std::isfinite (val) ? val : 0.0f;
+            }
+        }
+
+        if (reader->numChannels == 1 && dest.getNumChannels() > 1)
         {
             for (int ch = 1; ch < dest.getNumChannels(); ++ch)
-                dest.copyFrom (ch, destStart + localSkip, dest, 0, destStart + localSkip, readCount);
+                dest.copyFrom (ch, destStart, dest, 0, destStart, count);
         }
+
+        return true;
     };
 
     bool anyRegionOverlapped = false;
@@ -810,31 +1148,64 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
         if (overlapSamples <= 0)
             continue;
 
-        anyRegionOverlapped = true;
-
         auto* pitchRegion = dynamic_cast<PitchTunePluginPlaybackRegion*> (region);
         const double sourceSampleRate = (source->getSampleRate() > 0.0) ? source->getSampleRate() : safePlaybackRate;
         const double playbackOverlapStart = blockStartTime + (static_cast<double> (startSample) * sampleDuration);
-        const double sourceStartTime = (pitchRegion != nullptr)
-                                           ? pitchRegion->playbackToSourceTime (playbackOverlapStart)
-                                           : (region->getStartInAudioModificationTime() + (playbackOverlapStart - regionStart));
-        const int64_t sourceSampleOffset = static_cast<int64_t> (std::llround (sourceStartTime * sourceSampleRate));
+
+        double sourceStartTime = region->getStartInAudioModificationTime() + (playbackOverlapStart - regionStart);
+        double scale = 1.0;
+        if (pitchRegion != nullptr)
+        {
+            sourceStartTime = pitchRegion->playbackToSourceTime (playbackOverlapStart);
+            const double pbDur = pitchRegion->getDurationInPlaybackTime();
+            const double modDur = pitchRegion->getDurationInAudioModificationTime();
+            if (pbDur > 1e-6 && modDur > 1e-6)
+                scale = modDur / pbDur;
+        }
+
+        const double sourceTimeStepPerSample = scale * sampleDuration;
+        const double effectivePlaybackRate = (scale > 1e-6) ? (safePlaybackRate / scale) : safePlaybackRate;
+        const double exactSourceSample = sourceStartTime * sourceSampleRate;
 
         if (pitchRegion == nullptr || ! pitchRegion->isAnalysisCompleted())
         {
-            readSourceWindow (readerIt->second, tempProcessingBuffer, startSample, overlapSamples, sourceSampleOffset);
+            const bool ok = readSourceWindow (readerIt->second,
+                                              tempProcessingBuffer,
+                                              startSample,
+                                              overlapSamples,
+                                              exactSourceSample,
+                                              sourceSampleRate,
+                                              effectivePlaybackRate);
+            if (! ok)
+            {
+                needsReprime = true;
+                continue;
+            }
+
+            anyRegionOverlapped = true;
             for (int ch = 0; ch < numChannels; ++ch)
                 buffer.addFrom (ch, startSample, tempProcessingBuffer, ch, startSample, overlapSamples);
             continue;
         }
 
-        const int64_t sourceLatencyOffset = static_cast<int64_t> (std::llround (static_cast<double> (latencySamples) * (sourceSampleRate / safePlaybackRate)));
-
-        if (transportDiscontinuity || pitchRegion != lastActiveRegion || startSample > 0)
+        const bool mustPrime = transportDiscontinuity || (pitchRegion != lastActiveRegion) || (startSample > 0) || needsReprime;
+        if (mustPrime)
         {
             if (latencySamples > 0)
             {
-                readSourceWindow (readerIt->second, primeBuffer, 0, latencySamples, sourceSampleOffset);
+                const bool primeOk = readSourceWindow (readerIt->second,
+                                                       primeBuffer,
+                                                       0,
+                                                       latencySamples,
+                                                       exactSourceSample,
+                                                       sourceSampleRate,
+                                                       effectivePlaybackRate);
+                if (! primeOk)
+                {
+                    needsReprime = true;
+                    continue;
+                }
+
                 for (int ch = 0; ch < numChannels; ++ch)
                 {
                     if (ch < static_cast<int> (shifters.size()) && shifters[ch] != nullptr)
@@ -850,21 +1221,49 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
                 }
             }
 
-            smoothedShiftSemitones = pitchRegion->getPitchShiftSemitones (sourceStartTime, correctionAmount);
-            if (! std::isfinite (smoothedShiftSemitones))
-                smoothedShiftSemitones = 0.0f;
+            needsReprime = false;
+            fadeInSamplesRemaining = fadeInTotalSamples;
+        }
+
+        const double sourceLatencySamples = static_cast<double> (latencySamples) * (sourceSampleRate / effectivePlaybackRate);
+        const bool mainOk = readSourceWindow (readerIt->second,
+                                              tempProcessingBuffer,
+                                              startSample,
+                                              overlapSamples,
+                                              exactSourceSample + sourceLatencySamples,
+                                              sourceSampleRate,
+                                              effectivePlaybackRate);
+        if (! mainOk)
+        {
+            needsReprime = true;
+            continue;
+        }
+
+        anyRegionOverlapped = true;
+
+        if (static_cast<int> (shiftScratchBuffer.size()) < overlapSamples)
+            shiftScratchBuffer.resize (static_cast<size_t> (overlapSamples), 0.0f);
+
+        pitchRegion->computePitchShiftsForBlock (sourceStartTime,
+                                                 sourceTimeStepPerSample,
+                                                 overlapSamples,
+                                                 correctionAmount,
+                                                 shiftScratchBuffer.data(),
+                                                 lastValidTargetShift);
+
+        if (mustPrime)
+        {
+            const float initialShift = shiftScratchBuffer[0];
+            smoothedShiftSemitones = std::isfinite (initialShift) ? initialShift : 0.0f;
             lastActiveRegion = pitchRegion;
         }
 
-        const int64_t readAheadOffset = sourceSampleOffset + sourceLatencyOffset;
-        readSourceWindow (readerIt->second, tempProcessingBuffer, startSample, overlapSamples, readAheadOffset);
+        const bool isMonoSource = (readerPtr->numChannels == 1);
 
-        // Apply pitch shifting per overlapping sample with ~3ms note-boundary smoothing
+        // Apply WSOLA pitch shifting per overlapping sample with ~18ms natural pitch glide
         for (int i = startSample; i < endSample; ++i)
         {
-            const double playbackTime = blockStartTime + (static_cast<double> (i) * sampleDuration);
-            const double sourceTime = pitchRegion->playbackToSourceTime (playbackTime);
-            float shiftAmount = pitchRegion->getPitchShiftSemitones (sourceTime, correctionAmount);
+            float shiftAmount = shiftScratchBuffer[static_cast<size_t> (i - startSample)];
             if (! std::isfinite (shiftAmount))
                 shiftAmount = 0.0f;
 
@@ -872,17 +1271,41 @@ bool PitchTunePluginPlaybackRenderer::processBlock (juce::AudioBuffer<float>& bu
             if (! std::isfinite (smoothedShiftSemitones))
                 smoothedShiftSemitones = 0.0f;
 
-            for (int ch = 0; ch < numChannels; ++ch)
+            float fadeGain = 1.0f;
+            if (fadeInSamplesRemaining > 0)
             {
-                if (ch < static_cast<int> (shifters.size()) && shifters[ch] != nullptr)
-                {
-                    shifters[ch]->setPitchShift (smoothedShiftSemitones);
+                const int elapsed = fadeInTotalSamples - fadeInSamplesRemaining;
+                const float progress = static_cast<float> (elapsed + 1) / static_cast<float> (std::max (1, fadeInTotalSamples));
+                fadeGain = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * std::clamp (progress, 0.0f, 1.0f)));
+                --fadeInSamplesRemaining;
+            }
 
-                    const float sampleInput = tempProcessingBuffer.getSample (ch, i);
-                    float sampleOutput = 0.0f;
-                    shifters[ch]->process (&sampleInput, &sampleOutput, 1);
+            if (isMonoSource && ! shifters.empty() && shifters[0] != nullptr)
+            {
+                shifters[0]->setPitchShift (smoothedShiftSemitones);
 
+                const float sampleInput = tempProcessingBuffer.getSample (0, i);
+                float sampleOutput = 0.0f;
+                shifters[0]->process (&sampleInput, &sampleOutput, 1);
+                sampleOutput *= fadeGain;
+
+                for (int ch = 0; ch < numChannels; ++ch)
                     buffer.setSample (ch, i, buffer.getSample (ch, i) + sampleOutput);
+            }
+            else
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    if (ch < static_cast<int> (shifters.size()) && shifters[ch] != nullptr)
+                    {
+                        shifters[ch]->setPitchShift (smoothedShiftSemitones);
+
+                        const float sampleInput = tempProcessingBuffer.getSample (ch, i);
+                        float sampleOutput = 0.0f;
+                        shifters[ch]->process (&sampleInput, &sampleOutput, 1);
+
+                        buffer.setSample (ch, i, buffer.getSample (ch, i) + sampleOutput * fadeGain);
+                    }
                 }
             }
         }
@@ -1548,7 +1971,7 @@ PitchTunePluginAudioProcessor::PitchTunePluginAudioProcessor()
         "Correction",
         0.0f,
         100.0f,
-        85.0f
+        50.0f
     ));
 }
 
@@ -1735,9 +2158,7 @@ void PitchTunePluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buff
 
     int numSamples = buffer.getNumSamples();
     if (numSamples <= 0)
-    {
         return;
-    }
 
     if (totalNumInputChannels > 0)
     {
@@ -1753,7 +2174,7 @@ void PitchTunePluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buff
     if (detectedFreq > 0.0f && targetFreq > 0.0f)
     {
         const float rawShift = 12.0f * std::log2 (targetFreq / detectedFreq);
-        const float correctionFactor = (correctionAmountParam != nullptr) ? (correctionAmountParam->get() / 100.0f) : 0.85f;
+        const float correctionFactor = (correctionAmountParam != nullptr) ? (correctionAmountParam->get() / 100.0f) : 0.50f;
         targetShiftSemitones = rawShift * std::clamp (correctionFactor, 0.0f, 1.0f);
     }
     
@@ -1827,7 +2248,7 @@ void PitchTunePluginAudioProcessor::setStateInformation (const void* data, int s
 
             if (correctionAmountParam != nullptr)
             {
-                const float savedCorrection = std::clamp (static_cast<float> (xmlState->getDoubleAttribute ("correctionAmount", 85.0)), 0.0f, 100.0f);
+                const float savedCorrection = std::clamp (static_cast<float> (xmlState->getDoubleAttribute ("correctionAmount", 50.0)), 0.0f, 100.0f);
                 *correctionAmountParam = savedCorrection;
                 if (auto* customDoc = getPitchDocumentController())
                     customDoc->setPitchCorrectionAmount (savedCorrection / 100.0f);

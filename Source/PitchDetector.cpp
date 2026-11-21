@@ -25,27 +25,30 @@ PitchDetector::~PitchDetector()
 
 void PitchDetector::prepare (double sampleRateIn, int maxBlockSize)
 {
-    sampleRate = sampleRateIn;
+    (void) maxBlockSize;
+
+    sampleRate = (sampleRateIn > 0.0 && std::isfinite (sampleRateIn)) ? sampleRateIn : 44100.0;
     
     // 2048 samples window allows reliable detection down to 50 Hz at up to 96kHz.
     bufferSize = 2048;
     
-    ringBuffer.assign (bufferSize, 0.0f);
-    analysisBuffer.assign (bufferSize, 0.0f);
-    yinBuffer.assign (bufferSize / 2, 0.0f);
+    ringBuffer.assign (static_cast<size_t> (bufferSize), 0.0f);
+    analysisBuffer.assign (static_cast<size_t> (bufferSize), 0.0f);
+    yinBuffer.assign (static_cast<size_t> (bufferSize / 2), 0.0f);
     writeIndex = 0;
     currentFrequency = 0.0f;
 }
 
 void PitchDetector::process (const float* inputSamples, int numSamples)
 {
-    if (numSamples <= 0)
+    if (inputSamples == nullptr || numSamples <= 0 || bufferSize <= 0)
         return;
 
     // Stream incoming samples into ring buffer
     for (int i = 0; i < numSamples; ++i)
     {
-        ringBuffer[writeIndex] = inputSamples[i];
+        const float s = inputSamples[i];
+        ringBuffer[static_cast<size_t> (writeIndex)] = std::isfinite (s) ? s : 0.0f;
         writeIndex = (writeIndex + 1) % bufferSize;
     }
 
@@ -54,10 +57,10 @@ void PitchDetector::process (const float* inputSamples, int numSamples)
     for (int i = 0; i < bufferSize; ++i)
     {
         readIdx = (readIdx - 1 + bufferSize) % bufferSize;
-        analysisBuffer[bufferSize - 1 - i] = ringBuffer[readIdx];
+        analysisBuffer[static_cast<size_t> (bufferSize - 1 - i)] = ringBuffer[static_cast<size_t> (readIdx)];
     }
 
-    float detected = detectPitchDirect (analysisBuffer.data(), bufferSize);
+    const float detected = detectPitchDirect (analysisBuffer.data(), bufferSize);
 
     if (detected > 0.0f)
     {
@@ -74,37 +77,62 @@ void PitchDetector::process (const float* inputSamples, int numSamples)
 
 float PitchDetector::detectPitchDirect (const float* samples, int numSamples)
 {
-    if (numSamples < bufferSize)
+    if (samples == nullptr || numSamples < bufferSize || bufferSize < 16)
         return 0.0f;
 
-    // 1. Calculate Signal RMS to discard silence/unvoiced breath
+    // 1. Calculate Signal RMS & Zero-Crossing Rate to discard silence and unvoiced breath/sibilants
     float sumSquares = 0.0f;
-    for (int i = 0; i < bufferSize; ++i)
-        sumSquares += samples[i] * samples[i];
+    int zeroCrossings = 0;
+    bool prevNonNegative = (samples[0] >= 0.0f);
 
-    float rms = std::sqrt (sumSquares / static_cast<float> (bufferSize));
-    if (rms < silenceThreshold)
+    for (int i = 0; i < bufferSize; ++i)
+    {
+        const float s = samples[i];
+        if (! std::isfinite (s))
+            return 0.0f;
+
+        sumSquares += s * s;
+
+        if (i > 0)
+        {
+            const bool currNonNegative = (s >= 0.0f);
+            if (currNonNegative != prevNonNegative)
+                ++zeroCrossings;
+            prevNonNegative = currNonNegative;
+        }
+    }
+
+    if (! std::isfinite (sumSquares))
         return 0.0f;
 
-    int halfBuffer = bufferSize / 2;
+    const float rms = std::sqrt (sumSquares / static_cast<float> (bufferSize));
+    if (! std::isfinite (rms) || rms < silenceThreshold)
+        return 0.0f;
+
+    const float zcrHz = 0.5f * static_cast<float> (zeroCrossings)
+                        * static_cast<float> (sampleRate / static_cast<double> (bufferSize));
+    if (! std::isfinite (zcrHz) || zcrHz > 3800.0f)
+        return 0.0f;
+
+    const int halfBuffer = bufferSize / 2;
     int minLag = static_cast<int> (std::floor (sampleRate / maxFreq));
     int maxLag = static_cast<int> (std::ceil (sampleRate / minFreq));
 
-    minLag = std::clamp (minLag, 2, halfBuffer - 2);
-    maxLag = std::clamp (maxLag, minLag + 1, halfBuffer - 1);
+    minLag = std::clamp (minLag, 2, halfBuffer - 3);
+    maxLag = std::clamp (maxLag, minLag + 2, halfBuffer - 1);
 
     // 2. YIN Step 1: Difference function d_t(tau)
-    yinBuffer.assign (halfBuffer, 0.0f);
+    yinBuffer.assign (static_cast<size_t> (halfBuffer), 0.0f);
 
     for (int tau = 1; tau < halfBuffer; ++tau)
     {
         float diffSum = 0.0f;
         for (int i = 0; i < halfBuffer; ++i)
         {
-            float delta = samples[i] - samples[i + tau];
+            const float delta = samples[i] - samples[i + tau];
             diffSum += delta * delta;
         }
-        yinBuffer[tau] = diffSum;
+        yinBuffer[static_cast<size_t> (tau)] = diffSum;
     }
 
     // 3. YIN Step 2: Cumulative mean normalized difference function d'_t(tau)
@@ -113,43 +141,50 @@ float PitchDetector::detectPitchDirect (const float* samples, int numSamples)
 
     for (int tau = 1; tau < halfBuffer; ++tau)
     {
-        runningSum += yinBuffer[tau];
+        runningSum += yinBuffer[static_cast<size_t> (tau)];
         if (runningSum > 0.0f)
-            yinBuffer[tau] = (yinBuffer[tau] * static_cast<float> (tau)) / runningSum;
+            yinBuffer[static_cast<size_t> (tau)] = (yinBuffer[static_cast<size_t> (tau)] * static_cast<float> (tau)) / runningSum;
         else
-            yinBuffer[tau] = 1.0f;
+            yinBuffer[static_cast<size_t> (tau)] = 1.0f;
     }
 
-    // 4. YIN Step 3: Absolute threshold peak selection
+    // 4. YIN Step 3: Absolute threshold peak selection (true interior local minima only)
     int bestTau = -1;
     for (int tau = minLag; tau <= maxLag; ++tau)
     {
-        if (yinBuffer[tau] < yinThreshold)
+        if (yinBuffer[static_cast<size_t> (tau)] < yinThreshold)
         {
-            // Find local minimum
-            while (tau + 1 <= maxLag && yinBuffer[tau + 1] < yinBuffer[tau])
-                tau++;
+            while (tau + 1 <= maxLag && yinBuffer[static_cast<size_t> (tau + 1)] < yinBuffer[static_cast<size_t> (tau)])
+                ++tau;
 
-            bestTau = tau;
-            break;
+            if (tau == maxLag && yinBuffer[static_cast<size_t> (maxLag)] < yinBuffer[static_cast<size_t> (maxLag - 1)])
+                continue;
+
+            if (tau > minLag && tau < maxLag)
+            {
+                bestTau = tau;
+                break;
+            }
         }
     }
 
-    // Fallback: If no value fell below threshold, find global minimum in allowable range
+    // Fallback: search interior local minima in allowable range with tighter unvoiced rejection
     if (bestTau == -1)
     {
         float minVal = 1e10f;
-        for (int tau = minLag; tau <= maxLag; ++tau)
+        for (int tau = minLag + 1; tau <= maxLag - 1; ++tau)
         {
-            if (yinBuffer[tau] < minVal)
+            const float val = yinBuffer[static_cast<size_t> (tau)];
+            if (val <= yinBuffer[static_cast<size_t> (tau - 1)]
+                && val <= yinBuffer[static_cast<size_t> (tau + 1)]
+                && val < minVal)
             {
-                minVal = yinBuffer[tau];
+                minVal = val;
                 bestTau = tau;
             }
         }
 
-        // If the best minimum is still too noisy / unvoiced, reject
-        if (minVal > 0.45f)
+        if (bestTau == -1 || minVal > 0.22f)
             return 0.0f;
     }
 
@@ -157,24 +192,24 @@ float PitchDetector::detectPitchDirect (const float* samples, int numSamples)
     float interpolatedTau = static_cast<float> (bestTau);
     if (bestTau > 1 && bestTau < halfBuffer - 1)
     {
-        float s0 = yinBuffer[bestTau - 1];
-        float s1 = yinBuffer[bestTau];
-        float s2 = yinBuffer[bestTau + 1];
+        const float s0 = yinBuffer[static_cast<size_t> (bestTau - 1)];
+        const float s1 = yinBuffer[static_cast<size_t> (bestTau)];
+        const float s2 = yinBuffer[static_cast<size_t> (bestTau + 1)];
 
-        float denom = (s0 - 2.0f * s1 + s2);
+        const float denom = (s0 - 2.0f * s1 + s2);
         if (std::abs (denom) > 1e-6f)
         {
-            float delta = (s0 - s2) / (2.0f * denom);
+            const float delta = std::clamp ((s0 - s2) / (2.0f * denom), -0.5f, 0.5f);
             interpolatedTau += delta;
         }
     }
 
-    if (interpolatedTau <= 0.0f)
+    if (! std::isfinite (interpolatedTau) || interpolatedTau <= 0.0f)
         return 0.0f;
 
-    float frequency = static_cast<float> (sampleRate) / interpolatedTau;
+    const float frequency = static_cast<float> (sampleRate) / interpolatedTau;
 
-    if (frequency >= minFreq && frequency <= maxFreq)
+    if (std::isfinite (frequency) && frequency >= minFreq && frequency <= maxFreq)
         return frequency;
 
     return 0.0f;

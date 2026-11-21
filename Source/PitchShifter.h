@@ -15,7 +15,8 @@
 #include <vector>
 
 /**
-    A real-time monophonic pitch shifter using a dual-tap crossfading delay line.
+    A real-time monophonic pitch shifter using WSOLA-style waveform-aligned
+    crossfading, Catmull-Rom cubic interpolation, and stationary zero-shift parking.
     It shifts the pitch in semitones without changing the speed of the output.
 */
 class PitchShifter
@@ -36,29 +37,41 @@ public:
     /** Resets the internal state. */
     void reset();
 
-    /** Returns the constant center-tap delay latency in samples (~20ms). */
+    /** Returns the constant center-tap delay latency in samples (~31ms). */
     int getLatencySamples() const noexcept;
 
     /** Resets the delay line and pre-fills it with lookahead samples for zero-latency ARA playback. */
     void prime (const float* samples, int numSamples) noexcept;
 
 private:
-    // Helper to read from the delay line with linear interpolation
-    float readDelayLine (float delayInSamples);
+    float readDelayLineCubic (float delayInSamples) const noexcept;
+    float findBestAlignedDelay (float refDelay, float searchMinDelay, float searchMaxDelay) const noexcept;
 
     double sampleRate { 44100.0 };
     float pitchShiftSemitones { 0.0f };
     float pitchShiftRatio { 1.0f };
 
-    // Delay buffer
+    // Circular delay buffer
     std::vector<float> delayBuffer;
     int bufferSize { 16384 };
     int writeIndex { 0 };
 
-    // Size of the delay window in samples (around 40ms)
-    float windowSizeSamples { 1764.0f };
+    // WSOLA geometry (in samples, scaled to sampleRate in prepare())
+    float minDelaySamples { 16.0f };
+    float lowTriggerSamples { 617.0f };
+    float centerDelaySamples { 1367.0f };
+    float highTriggerSamples { 2117.0f };
+    int minJumpSamples { 617 };
+    int maxJumpSamples { 1499 };
+    int xfadeLengthSamples { 441 };
+    int corrWindowSamples { 353 };
 
-    // Phases for the two reading taps (0.0 to 1.0)
-    float phase1 { 0.0f };
-    float phase2 { 0.5f }; // Out of phase by 180 degrees
+    // Active tap and WSOLA crossfade state
+    float activeDelay { 1367.0f };
+    float incomingDelay { 1367.0f };
+    bool isCrossfading { false };
+    int xfadePos { 0 };
+    int activeXfadeLen { 441 };
+    bool recenteredForZeroShift { true };
+    float recentEnergy { 0.0f };
 };

@@ -5,13 +5,17 @@ JUCE 8 と Celemony ARA 2.0 SDK を用いて開発されたオフライン手動
 
 ---
 
-## 🌟 主な特徴 (v1.2.2)
+## 🌟 主な特徴 (v1.2.3)
 
+- **自然で透明感のあるボーカル音声品質 (WSOLA & ロックフリー再生)**
+  - **WSOLA 波形相関クロスフェード型ピッチシフター + 3次エルミート補間**: クロスフェード時のみ相互相関で波形の山谷を一致させ、通常再生時は単一タップ＋3次補間でコムフィルタリングや高域劣化を防止。無補正時（0半音）は完全静止で元の音質をそのまま保持します。
+  - **ロックフリー UI 描画キャッシュ & ブロック単位ピッチ計算**: エディタ開画面中（30fps 描画）にオーディオ処理スレッドとスピンロックが競合して一瞬ピッチが戻る不具合を解消しました。
+  - **高音質ピッチ解析（ZCR 無声音除去 + 5フレームメディアンフィルタ）**: 息・歯擦音を誤検出しにくくし、1フレーム単位のオクターブ飛び・ピッチスパイクを抑制。アタック／リリース時は滑らかな Hann エンベロープと 18ms スムージングで自然に移行します（`Center` 初期値 50%）。
+  - **サンプルレート差リサンプリング & 再生開始／シーク時クリック防止**: クリップとプロジェクトのサンプルレートが異なる場合（例: 44.1kHz vs 48kHz）の高品質 3次補間リサンプリング、キャッシュ待ち時の再プライム、および 4ms フェードインに対応。
 - **ARA 2.0 (Audio Random Access) 完全対応 & 実質ゼロ遅延**
   - Cakewalk SONAR / Studio One / Reaper / Cubase / Logic Pro 等の ARA 2.0 対応 DAW と直接同期。
   - `PlaybackRenderer` と `EditorRenderer` が同一インスタンスにバインドされる DAW（Cakewalk SONAR 等）でも正常に音声が出力されるようバッファ管理・持続的バッファリングリーダー（`BufferingAudioReader`）・サンプルアクセス通知（`didEnableAudioSourceSamplesAccess`）・モノラル／ステレオ／入力無効バス構成に対応。
   - ARA 再生時は先読み（Lookahead Priming）により **出力レイテンシ 0ms** で動作し、伴奏とのタイミングズレやシーク時の残響ノイズが発生しません。
-  - 音声クリップを自動解析し、ノート情報と詳細なピッチ軌跡を取得。レガート歌唱の自動分割にも対応。
   - DAW タイムライン上のクリップ移動・分割・トリミング位置に合わせて複数クリップを正確に配置表示。
   - 編集したピッチ・ノート分割・結合内容は DAW プロジェクト保存時に自動で保存・復元。
 - **直感的なピアノロール GUI エディタ**
@@ -26,12 +30,10 @@ JUCE 8 と Celemony ARA 2.0 SDK を用いて開発されたオフライン手動
   - **`Shift + 右クリック`**: クリック位置に近い隣接ノートと 1 つに結合。
   - **ダブルクリック**: 編集したノートの音程・セントを元の位置へワンタッチリセット。
   - **`Re-Analyze` ボタン**: 編集内容を破棄してトラック全体を再解析。
-  - **`Center` スライダー (0〜100%)**: ノート内の音程の揺れ・ズレを目標音程の中心へ自動補正（ピッチ軌跡も連動表示）。
-- **位相連続 & NaN セーフなピッチシフター (`PitchShifter`)**
-  - 補正あり・補正なし（0半音）の境界でも常に一定ディレイ構成を保ち、ノート境界のタイミング段差やクリックノイズを低減。
+  - **`Center` スライダー (0〜100%, 初期値 50%)**: ノート内の音程の揺れ・ズレを目標音程の中心へ自動補正（ピッチ軌跡も連動表示）。
+- **NaN セーフ設計 & リアルタイムフォールバックモード**
   - 非有限値（`NaN` / `Inf`）のガードを全段に組み込み、64-bit ミキシングエンジンへの異常値混入を防止。
-- **リアルタイムフォールバックモード**
-  - ARA 非対応の DAW ホストや通常インサート時でも、自動ピッチ補正（オートチューン）として動作するデュアルモード設計（ホスト側へのレイテンシ補正通知・モノラル入力時のステレオ複製対応）。
+  - ARA 非対応の DAW ホストや通常インサート時でも、自動ピッチ補正（オートチューン）として動作するデュアルモード設計。
 
 ---
 
@@ -39,15 +41,15 @@ JUCE 8 と Celemony ARA 2.0 SDK を用いて開発されたオフライン手動
 
 - `Source/PluginProcessor.h` / `Source/PluginProcessor.cpp`:
   - `juce::AudioProcessorARAExtension` を継承したメインプロセッサ。
-  - `PitchTunePluginPlaybackRegion`: DAW クリップごとの解析・ノート管理・手動分割・結合・セント補正計算。
-  - `PitchTunePluginPlaybackRenderer`: 持続的 `BufferingAudioReader`・先読み（Lookahead Priming）・シーク時バッファクリア対応のピッチシフトレンダリング。
+  - `PitchTunePluginPlaybackRegion`: 3パス解析（メディアン＆スムージング）、ブロック単位ピッチ計算、`notesVersion` 管理、手動分割・結合・アタック/リリース補正。
+  - `PitchTunePluginPlaybackRenderer`: 持続的 `BufferingAudioReader`・3次補間リサンプリング・キャッシュ待ち再プライム・先読み `prime()`・4ms フェードイン付きレンダリング。
   - `PitchTunePluginDocumentController`: ドキュメント全体の統括、ARA アーカイブ保存・復元、バックグラウンド解析・強制再解析スレッド。
 - `Source/PluginEditor.h` / `Source/PluginEditor.cpp`:
   - `juce::AudioProcessorEditorARAExtension` を継承したリサイズ可能なプラグイン GUI（`Center` スライダー・`Re-Analyze` ボタン・操作ヒント付き）。
 - `Source/PianoRollComponent.h` / `Source/PianoRollComponent.cpp`:
-  - ピアノロール描画、ドラッグ転調、`Alt+ドラッグ` セント調整、右クリック分割、`Shift+右クリック` 結合、ダブルクリックリセット、`Ctrl+ホイール` 横ズーム、再生ヘッド描画。
-- `Source/PitchDetector.h` / `Source/PitchDetector.cpp`: 自己差分 (YIN/NSDF) ベースの高精度基本周波数 (F0) 推定エンジン。
-- `Source/PitchShifter.h` / `Source/PitchShifter.cpp`: 定遅延クロスフェード型ディレイライン・ピッチシフター DSP（先読み `prime()`・`NaN` ガード対応）。
+  - `notesVersion` ベースの発音中ロックフリー描画、ドラッグ転調、`Alt+ドラッグ` セント調整、右クリック分割、`Shift+右クリック` 結合、ダブルクリックリセット、`Ctrl+ホイール` 横ズーム、再生ヘッド描画。
+- `Source/PitchDetector.h` / `Source/PitchDetector.cpp`: YIN ベース F0 推定＋ゼロ交差率（ZCR）無声音除去エンジン。
+- `Source/PitchShifter.h` / `Source/PitchShifter.cpp`: WSOLA 波形相関クロスフェード + Catmull-Rom 3次補間・無補正時静止型ピッチシフター DSP。
 - `Source/ARALibraryIncludes.cpp`: JUCE 8 標準バンドルとの重複リンク警告を防ぐための ARA SDK スタブ（ライセンス注記保持）。
 - `install_vst3.bat`: ビルドされた VST3 プラグインをシステム共通プラグインフォルダにワンクリックで昇格コピーするインストーラー。
 
@@ -88,7 +90,7 @@ MSBuild.exe Builds\VisualStudio2026\PitchTunePlugin.sln /p:Configuration=Release
    - Cakewalk SONAR / Studio One / Reaper / Cubase 等の ARA 2.0 対応 DAW で、ボーカルオーディオイベント（クリップ）に対して **Region FX / ARA プラグイン拡張** として `PitchTunePlugin` を適用します。
 3. **編集**:
    - エディタ画面にボーカルのノートブロックとピッチ軌跡が表示されます。
-   - **ドラッグ**: 半音移動 / **`Alt + ドラッグ`**: セント微調整 / **右クリック**: ノート分割 / **`Shift + 右クリック`**: ノート結合 / **ダブルクリック**: リセット / **`Ctrl + ホイール`**: 横ズーム / **`Center` スライダー**: ノート内の揺れ補正強度を調整 / **`Re-Analyze`**: 再解析して初期状態に戻します。
+   - **ドラッグ**: 半音移動 / **`Alt + ドラッグ`**: セント微調整 / **右クリック**: ノート分割 / **`Shift + 右クリック`**: ノート結合 / **ダブルクリック**: リセット / **`Ctrl + ホイール`**: 横ズーム / **`Center` スライダー**: ノート内の揺れ補正強度を調整（初期値 50%） / **`Re-Analyze`**: 再解析して初期状態に戻します。
 4. **再生**:
    - DAW の再生ボタンを押すと、補正された音声がリアルタイム（伴奏ズレなし）で再生されます。
 

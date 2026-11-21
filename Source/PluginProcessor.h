@@ -14,6 +14,8 @@
 
 #include <JuceHeader.h>
 #include <juce_audio_formats/format/juce_ARAAudioReaders.h>
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -129,10 +131,15 @@ public:
     {
         abortAnalysis.store (false);
         analysisCompleted.store (false);
+        incrementNotesVersion();
     }
 
     /** Checks if the background analysis has completed. */
     bool isAnalysisCompleted() const noexcept { return analysisCompleted.load(); }
+
+    /** Monotonic version counter incremented on any note change (allows lock-free UI caching). */
+    uint64_t getNotesVersion() const noexcept { return notesVersion.load (std::memory_order_acquire); }
+    void incrementNotesVersion() noexcept { notesVersion.fetch_add (1, std::memory_order_release); }
 
     /** Restores persisted notes from an ARA archive safely under lock. */
     void restoreNotes (const std::vector<Note>& restoredNotes);
@@ -155,8 +162,16 @@ public:
     /** Returns the maximum timeline extent (in seconds) of the region's audio/notes. */
     double getMaxTimelineSeconds() const noexcept;
 
+    /** Computes pitch shifts (in semitones) for an entire block under one non-blocking try-lock. */
+    bool computePitchShiftsForBlock (double startSourceTime,
+                                     double sourceTimeStepPerSample,
+                                     int numSamples,
+                                     float correctionAmount,
+                                     float* outShifts,
+                                     float& lastValidShift) const noexcept;
+
     /** Computes the required pitch shift (in semitones) at a given source time (seconds). */
-    float getPitchShiftSemitones (double timeInSeconds, float correctionAmount = 0.85f) const;
+    float getPitchShiftSemitones (double timeInSeconds, float correctionAmount = 0.50f) const;
 
     /** Returns the spin lock protecting `notes`. */
     juce::SpinLock& getNotesLock() const noexcept { return notesLock; }
@@ -165,6 +180,7 @@ public:
 
 private:
     mutable juce::SpinLock notesLock;
+    std::atomic<uint64_t> notesVersion { 0 };
     std::atomic<bool> analysisCompleted { false };
     std::atomic<bool> abortAnalysis { false };
     double sourceSampleRate { 44100.0 };
@@ -177,7 +193,7 @@ private:
 /**
     ARA Playback Renderer processes audio clips during DAW playback.
     It maintains long-lived buffered audio source readers off the audio thread,
-    reads audio with lookahead priming, applies pitch shifting, and writes to output.
+    reads audio with lookahead priming, applies WSOLA pitch shifting, and writes to output.
 */
 class PitchTunePluginPlaybackRenderer : public juce::ARAPlaybackRenderer,
                                         private juce::AsyncUpdater
@@ -216,14 +232,20 @@ private:
     bool isPreparedFlag { false };
 
     float smoothedShiftSemitones { 0.0f };
+    float lastValidTargetShift { 0.0f };
     int64_t lastNextBlockSample { -1 };
     bool wasPlaying { false };
+    bool needsReprime { true };
+    int fadeInSamplesRemaining { 0 };
+    int fadeInTotalSamples { 192 };
     PitchTunePluginPlaybackRegion* lastActiveRegion { nullptr };
     
     // Audio processing tools per channel
     std::vector<std::unique_ptr<PitchShifter>> shifters;
     juce::AudioBuffer<float> tempProcessingBuffer;
+    juce::AudioBuffer<float> resampleScratchBuffer;
     juce::AudioBuffer<float> primeBuffer;
+    std::vector<float> shiftScratchBuffer;
 
     // Persistent source readers managed off the real-time audio thread
     juce::SharedResourcePointer<SharedARATimeSliceThread> sharedTimesliceThread;
@@ -338,7 +360,7 @@ private:
     std::map<std::string, std::vector<PitchTunePluginPlaybackRegion::Note>> archivedSourceNotes;
     std::map<std::string, std::string> modToSourceId;
     std::atomic<double> playheadTimeSeconds { 0.0 };
-    std::atomic<float> pitchCorrectionAmount { 0.85f };
+    std::atomic<float> pitchCorrectionAmount { 0.50f };
     std::shared_ptr<std::atomic<bool>> controllerAlive { std::make_shared<std::atomic<bool>> (true) };
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchTunePluginDocumentController)

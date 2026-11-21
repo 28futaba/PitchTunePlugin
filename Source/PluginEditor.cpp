@@ -51,7 +51,7 @@ PitchTunePluginAudioProcessorEditor::PitchTunePluginAudioProcessorEditor (PitchT
 
     const float initialPct = (audioProcessor.getCorrectionAmountParameter() != nullptr)
                                  ? audioProcessor.getCorrectionAmountParameter()->get()
-                                 : 85.0f;
+                                 : 50.0f;
     correctionSlider.setValue (initialPct, juce::dontSendNotification);
     if (auto* docController = audioProcessor.getPitchDocumentController())
         docController->setPitchCorrectionAmount (initialPct / 100.0f);
@@ -143,6 +143,4 @@ void PitchTunePluginAudioProcessorEditor::timerCallback()
         if (auto* docController = audioProcessor.getPitchDocumentController())
             docController->setPitchCorrectionAmount (paramPct / 100.0f);
     }
-
-    repaint();
 }
