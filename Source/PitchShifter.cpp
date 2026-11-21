@@ -19,6 +19,7 @@
 #endif
 
 PitchShifter::PitchShifter()
+    : delayBuffer (16384, 0.0f)
 {
 }
 
@@ -30,13 +31,13 @@ void PitchShifter::prepare (double sampleRateIn, int maxBlockSize)
 {
     (void) maxBlockSize;
 
-    sampleRate = (sampleRateIn > 0.0) ? sampleRateIn : 44100.0;
+    sampleRate = (sampleRateIn > 0.0 && std::isfinite (sampleRateIn)) ? sampleRateIn : 44100.0;
     
     // Set a window size of approximately 40ms.
     windowSizeSamples = static_cast<float> (sampleRate * 0.040); 
     
-    bufferSize = 16384;
-    delayBuffer.assign (bufferSize, 0.0f);
+    bufferSize = std::max (16384, static_cast<int> (std::ceil (windowSizeSamples * 2.0f)) + 256);
+    delayBuffer.assign (static_cast<size_t> (bufferSize), 0.0f);
     
     writeIndex = 0;
     phase1 = 0.0f;
@@ -48,6 +49,9 @@ void PitchShifter::prepare (double sampleRateIn, int maxBlockSize)
 
 void PitchShifter::setPitchShift (float semitones)
 {
+    if (! std::isfinite (semitones))
+        semitones = 0.0f;
+
     pitchShiftSemitones = std::clamp (semitones, -12.0f, 12.0f);
     pitchShiftRatio = std::pow (2.0f, pitchShiftSemitones / 12.0f);
 }
@@ -67,42 +71,51 @@ int PitchShifter::getLatencySamples() const noexcept
 
 void PitchShifter::prime (const float* samples, int numSamples) noexcept
 {
+    if (delayBuffer.empty() || bufferSize <= 0)
+        return;
+
     std::fill (delayBuffer.begin(), delayBuffer.end(), 0.0f);
     writeIndex = 0;
     phase1 = 0.0f;
     phase2 = 0.5f;
 
-    if (samples == nullptr || numSamples <= 0 || bufferSize <= 0)
+    if (samples == nullptr || numSamples <= 0)
         return;
 
     const int startIdx = std::max (0, numSamples - bufferSize);
     for (int i = startIdx; i < numSamples; ++i)
     {
-        delayBuffer[writeIndex] = samples[i];
+        const float s = samples[i];
+        delayBuffer[static_cast<size_t> (writeIndex)] = std::isfinite (s) ? s : 0.0f;
         writeIndex = (writeIndex + 1) % bufferSize;
     }
 }
 
 float PitchShifter::readDelayLine (float delayInSamples)
 {
-    float readPos = static_cast<float> (writeIndex) - delayInSamples;
-    
-    while (readPos < 0.0f)
-        readPos += static_cast<float> (bufferSize);
-    while (readPos >= static_cast<float> (bufferSize))
-        readPos -= static_cast<float> (bufferSize);
+    if (delayBuffer.empty() || bufferSize <= 0 || ! std::isfinite (delayInSamples))
+        return 0.0f;
 
-    int idx1 = static_cast<int> (readPos);
-    int idx2 = (idx1 + 1) % bufferSize;
-    float frac = readPos - static_cast<float> (idx1);
+    const float fBufSize = static_cast<float> (bufferSize);
+    float readPos = std::fmod (static_cast<float> (writeIndex) - delayInSamples, fBufSize);
+    if (readPos < 0.0f)
+        readPos += fBufSize;
 
-    return (1.0f - frac) * delayBuffer[idx1] + frac * delayBuffer[idx2];
+    const int idx1 = std::clamp (static_cast<int> (readPos), 0, bufferSize - 1);
+    const int idx2 = (idx1 + 1) % bufferSize;
+    const float frac = std::clamp (readPos - static_cast<float> (idx1), 0.0f, 1.0f);
+
+    return (1.0f - frac) * delayBuffer[static_cast<size_t> (idx1)] + frac * delayBuffer[static_cast<size_t> (idx2)];
 }
 
 void PitchShifter::process (const float* inputSamples, float* outputSamples, int numSamples)
 {
-    if (numSamples <= 0 || windowSizeSamples <= 1.0f)
+    if (delayBuffer.empty() || bufferSize <= 0 || numSamples <= 0 || windowSizeSamples <= 1.0f
+        || inputSamples == nullptr || outputSamples == nullptr)
         return;
+
+    if (! std::isfinite (phase1)) phase1 = 0.0f;
+    if (! std::isfinite (phase2)) phase2 = 0.5f;
 
     const float minDelayOffset = 32.0f;
     float phaseStep = 0.0f;
@@ -134,12 +147,15 @@ void PitchShifter::process (const float* inputSamples, float* outputSamples, int
     else
     {
         phaseStep = (1.0f - pitchShiftRatio) / windowSizeSamples;
+        if (! std::isfinite (phaseStep))
+            phaseStep = 0.0f;
     }
 
     for (int i = 0; i < numSamples; ++i)
     {
         // Must preserve raw input before overwriting outputSamples (in-place buffer safety)
-        const float inSample = inputSamples[i];
+        const float rawIn = inputSamples[i];
+        const float inSample = std::isfinite (rawIn) ? rawIn : 0.0f;
 
         if (phaseStep != 0.0f)
         {
@@ -151,6 +167,9 @@ void PitchShifter::process (const float* inputSamples, float* outputSamples, int
 
             if (phase2 >= 1.0f) phase2 -= 1.0f;
             else if (phase2 < 0.0f) phase2 += 1.0f;
+
+            if (! std::isfinite (phase1) || phase1 < 0.0f || phase1 >= 1.0f) phase1 = 0.0f;
+            if (! std::isfinite (phase2) || phase2 < 0.0f || phase2 >= 1.0f) phase2 = 0.5f;
         }
 
         const float delay1 = minDelayOffset + phase1 * windowSizeSamples;
@@ -168,9 +187,10 @@ void PitchShifter::process (const float* inputSamples, float* outputSamples, int
             w2 /= wSum;
         }
 
-        outputSamples[i] = (w1 * out1) + (w2 * out2);
+        const float outSample = (w1 * out1) + (w2 * out2);
+        outputSamples[i] = std::isfinite (outSample) ? outSample : 0.0f;
 
-        delayBuffer[writeIndex] = inSample;
+        delayBuffer[static_cast<size_t> (writeIndex)] = inSample;
         writeIndex = (writeIndex + 1) % bufferSize;
     }
 }

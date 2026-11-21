@@ -14,12 +14,68 @@
 
 #include <JuceHeader.h>
 #include <juce_audio_formats/format/juce_ARAAudioReaders.h>
+#include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include "PitchDetector.h"
 #include "PitchShifter.h"
 
 class PitchTunePluginDocumentController;
+class PitchTunePluginPlaybackRenderer;
+
+//==============================================================================
+/**
+    Shared background thread used by BufferingAudioReader instances so the real-time
+    audio thread never blocks or creates/destroys ARA host readers during playback.
+*/
+class SharedARATimeSliceThread final : public juce::TimeSliceThread
+{
+public:
+    SharedARATimeSliceThread()
+        : juce::TimeSliceThread ("PitchTune ARA Sample Reader")
+    {
+        startThread (juce::Thread::Priority::high);
+    }
+
+    ~SharedARATimeSliceThread() override
+    {
+        stopThread (2000);
+    }
+};
+
+//==============================================================================
+/**
+    Wrapper holding either a BufferingAudioReader (for realtime playback) or a
+    direct ARAAudioSourceReader (for offline rendering).
+*/
+class PossiblyBufferedReader
+{
+public:
+    PossiblyBufferedReader() = default;
+
+    explicit PossiblyBufferedReader (std::unique_ptr<juce::BufferingAudioReader> readerIn)
+        : setTimeoutFn ([ptr = readerIn.get()] (int ms) { ptr->setReadTimeout (ms); }),
+          reader (std::move (readerIn))
+    {}
+
+    explicit PossiblyBufferedReader (std::unique_ptr<juce::AudioFormatReader> readerIn)
+        : setTimeoutFn(),
+          reader (std::move (readerIn))
+    {}
+
+    void setReadTimeout (int ms) const
+    {
+        if (setTimeoutFn)
+            setTimeoutFn (ms);
+    }
+
+    juce::AudioFormatReader* get() const noexcept { return reader.get(); }
+
+private:
+    std::function<void (int)> setTimeoutFn;
+    std::unique_ptr<juce::AudioFormatReader> reader;
+};
 
 //==============================================================================
 /**
@@ -120,9 +176,11 @@ private:
 //==============================================================================
 /**
     ARA Playback Renderer processes audio clips during DAW playback.
-    It reads audio from the source with lookahead priming, applies pitch shifting, and writes to output.
+    It maintains long-lived buffered audio source readers off the audio thread,
+    reads audio with lookahead priming, applies pitch shifting, and writes to output.
 */
-class PitchTunePluginPlaybackRenderer : public juce::ARAPlaybackRenderer
+class PitchTunePluginPlaybackRenderer : public juce::ARAPlaybackRenderer,
+                                        private juce::AsyncUpdater
 {
 public:
     PitchTunePluginPlaybackRenderer (ARA::PlugIn::DocumentController* documentController);
@@ -139,9 +197,24 @@ public:
                        juce::AudioProcessor::Realtime realtime,
                        const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept override;
 
+    using juce::ARAPlaybackRenderer::processBlock;
+
+    void didAddPlaybackRegion (ARA::PlugIn::PlaybackRegion* playbackRegion) noexcept override;
+    void willRemovePlaybackRegion (ARA::PlugIn::PlaybackRegion* playbackRegion) noexcept override;
+
+    /** Schedules an async reader rebuild (called when host enables audio source sample access). */
+    void notifyAudioSourceAccessChanged() noexcept { triggerAsyncUpdate(); }
+
 private:
+    void handleAsyncUpdate() override;
+    void rebuildReaders();
+
     double currentSampleRate { 44100.0 };
     int currentSamplesPerBlock { 512 };
+    int preparedNumChannels { 2 };
+    bool useBufferedReaders { true };
+    bool isPreparedFlag { false };
+
     float smoothedShiftSemitones { 0.0f };
     int64_t lastNextBlockSample { -1 };
     bool wasPlaying { false };
@@ -152,12 +225,19 @@ private:
     juce::AudioBuffer<float> tempProcessingBuffer;
     juce::AudioBuffer<float> primeBuffer;
 
+    // Persistent source readers managed off the real-time audio thread
+    juce::SharedResourcePointer<SharedARATimeSliceThread> sharedTimesliceThread;
+    juce::SpinLock readerLock;
+    std::map<juce::ARAAudioSource*, PossiblyBufferedReader> audioSourceReaders;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchTunePluginPlaybackRenderer)
 };
 
 //==============================================================================
 /**
     ARA Editor Renderer handles audition/preview playback when DAW transport is stopped or editing.
+    Leaves the shared buffer untouched so hosts binding PlaybackRenderer + EditorRenderer on the
+    same plugin instance retain PlaybackRenderer's rendered audio.
 */
 class PitchTunePluginEditorRenderer : public juce::ARAEditorRenderer
 {
@@ -174,6 +254,8 @@ public:
     bool processBlock (juce::AudioBuffer<float>& buffer,
                        juce::AudioProcessor::Realtime realtime,
                        const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept override;
+
+    using juce::ARAEditorRenderer::processBlock;
 
 private:
     double currentSampleRate { 44100.0 };
@@ -208,6 +290,13 @@ public:
     std::vector<PitchTunePluginPlaybackRegion*> getActivePitchRegions() const;
     void unregisterRegion (PitchTunePluginPlaybackRegion* region);
 
+    void registerPlaybackRenderer (PitchTunePluginPlaybackRenderer* renderer);
+    void unregisterPlaybackRenderer (PitchTunePluginPlaybackRenderer* renderer);
+    void notifyRenderersToRebuildReaders();
+
+    /** Non-blocking lock used by audio threads during ARA model edits. */
+    juce::ScopedTryReadLock getProcessingTryReadLock() const noexcept { return juce::ScopedTryReadLock (processBlockLock, true); }
+
     /** Caches region note edits for project persistence and notifies the ARA host. */
     void cacheRegionNotes (PitchTunePluginPlaybackRegion* region);
 
@@ -225,6 +314,10 @@ public:
     void preparePreview (double) {}
 
 protected:
+    void willBeginEditing (juce::ARADocument* document) override;
+    void didEndEditing (juce::ARADocument* document) override;
+    void didEnableAudioSourceSamplesAccess (juce::ARAAudioSource* audioSource, bool enable) override;
+
     bool doRestoreObjectsFromStream (juce::ARAInputStream& input, const juce::ARARestoreObjectsFilter* filter) override;
     bool doStoreObjectsToStream (juce::ARAOutputStream& output, const juce::ARAStoreObjectsFilter* filter) override;
 
@@ -237,13 +330,16 @@ protected:
 private:
     juce::ThreadPool threadPool { 1 };
     mutable juce::CriticalSection regionLock;
+    mutable juce::ReadWriteLock processBlockLock;
     std::vector<PitchTunePluginPlaybackRegion*> activeRegions;
+    std::vector<PitchTunePluginPlaybackRenderer*> playbackRenderers;
     PitchTunePluginPlaybackRegion* currentlyAnalyzingRegion { nullptr };
     std::map<std::string, std::vector<PitchTunePluginPlaybackRegion::Note>> archivedModificationNotes;
     std::map<std::string, std::vector<PitchTunePluginPlaybackRegion::Note>> archivedSourceNotes;
     std::map<std::string, std::string> modToSourceId;
     std::atomic<double> playheadTimeSeconds { 0.0 };
     std::atomic<float> pitchCorrectionAmount { 0.85f };
+    std::shared_ptr<std::atomic<bool>> controllerAlive { std::make_shared<std::atomic<bool>> (true) };
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchTunePluginDocumentController)
 };
@@ -269,6 +365,10 @@ public:
    #endif
 
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    using juce::AudioProcessor::processBlock;
+
+    juce::AudioProcessorARAExtension* getARAClientExtensions() override { return this; }
+    void didBindToARA() noexcept override;
 
     //==============================================================================
     juce::AudioProcessorEditor* createEditor() override;

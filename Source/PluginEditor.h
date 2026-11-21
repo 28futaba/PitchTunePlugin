@@ -35,6 +35,8 @@ public:
     // Timer callback to refresh visual elements
     void timerCallback() override;
 
+    juce::AudioProcessorEditorARAExtension* getARAClientExtensions() override { return this; }
+
 private:
     PitchTunePluginAudioProcessor& audioProcessor;
 

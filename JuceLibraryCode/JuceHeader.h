@@ -43,7 +43,7 @@ namespace ProjectInfo
 {
     const char* const  projectName    = "PitchTunePlugin";
     const char* const  companyName    = "28futaba";
-    const char* const  versionString  = "1.2.1";
-    const int          versionNumber  = 0x10201;
+    const char* const  versionString  = "1.2.2";
+    const int          versionNumber  = 0x10202;
 }
 #endif
